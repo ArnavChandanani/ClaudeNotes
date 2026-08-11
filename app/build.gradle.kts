@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.booxnotes"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.4"
+        versionCode = 5
+        versionName = "0.5"
     }
 
     compileOptions {
@@ -36,7 +36,6 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
-
-    // Display-side Onyx SDK only (EpdController). NOT the pen/raw-drawing SDK.
+    // Display-side Onyx SDK (EpdController fast mode only).
     implementation("com.onyx.android.sdk:onyxsdk-device:1.2.31")
 }

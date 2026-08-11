@@ -5,7 +5,6 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Rect
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
@@ -26,11 +25,10 @@ import java.util.Locale
 import kotlin.math.hypot
 
 /**
- * v0.4 -- e-ink latency.
- *  - App-wide A2 fast mode via EpdController.applyApplicationFastMode at startup.
- *  - Each stroke segment is pushed to the panel immediately (partial update) instead
- *    of waiting on the framework invalidate cycle. Both EpdController calls are
- *    reflection-guarded: if the firmware lacks them, we fall back to invalidate().
+ * v0.5 -- correct rendering (invalidate dirty rect) + automatic A2 fast mode.
+ * The broken "push straight to panel instead of drawing" path from v0.4 is gone:
+ * the EPD refresh never ran onDraw, so the framebuffer stayed empty. We always
+ * invalidate now; speed comes from applyApplicationFastMode, not from skipping draws.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -38,7 +36,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Epd.applyFastMode(this)   // turn on A2 for this app
+        Epd.applyFastMode(this)
         val root = FrameLayout(this)
         drawView = DrawView(this)
         root.addView(
@@ -90,43 +88,23 @@ class MainActivity : AppCompatActivity() {
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 }
 
-/** Reflection-guarded EpdController access so a missing class never crashes the app. */
+/** Reflection-guarded EpdController: applies A2 for the whole app; no-op if unavailable. */
 object Epd {
     private fun controller(): Class<*>? = try {
         Class.forName("com.onyx.android.sdk.device.EpdController")
     } catch (e: Throwable) { null }
 
-    fun applyFastMode(ctx: Context) {
+    private fun setFast(pkg: String, enable: Boolean) {
         try {
-            val m = controller()?.getMethod(
+            controller()?.getMethod(
                 "applyApplicationFastMode",
                 String::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType
-            )
-            m?.invoke(null, ctx.packageName, true, true)
-        } catch (e: Throwable) { /* fall back to normal refresh */ }
+            )?.invoke(null, pkg, enable, true)
+        } catch (e: Throwable) { /* firmware lacks it -> normal refresh */ }
     }
 
-    fun clearFastMode(ctx: Context) {
-        try {
-            val m = controller()?.getMethod(
-                "applyApplicationFastMode",
-                String::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType
-            )
-            m?.invoke(null, ctx.packageName, false, true)
-        } catch (e: Throwable) {}
-    }
-
-    /** Push a specific region of a view to the panel now. Returns true if it worked. */
-    fun repaintRegion(view: View, rect: Rect): Boolean {
-        return try {
-            val m = controller()?.getMethod(
-                "repaintEveryThing", View::class.java
-            )
-            // Simple, broadly-present call: repaint the view immediately.
-            m?.invoke(null, view)
-            true
-        } catch (e: Throwable) { false }
-    }
+    fun applyFastMode(ctx: Context) = setFast(ctx.packageName, true)
+    fun clearFastMode(ctx: Context) = setFast(ctx.packageName, false)
 }
 
 class DrawView(context: Context) : View(context) {
@@ -158,7 +136,6 @@ class DrawView(context: Context) : View(context) {
     private var lastX = 0f
     private var lastY = 0f
     private val pad = STROKE_WIDTH * 2f
-    private val dirty = Rect()
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -185,7 +162,7 @@ class DrawView(context: Context) : View(context) {
                 currentPts = mutableListOf(Pt(x, y, event.pressure, event.eventTime))
                 lastX = x; lastY = y
                 pageCanvas?.drawPoint(x, y, paint)
-                pushRegion(x, y, x, y)
+                invalidate((x - pad).toInt(), (y - pad).toInt(), (x + pad).toInt(), (y + pad).toInt())
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
@@ -212,21 +189,12 @@ class DrawView(context: Context) : View(context) {
         if (hypot(x - lastX, y - lastY) < MIN_DIST) return
         canvas.drawLine(lastX, lastY, x, y, paint)
         currentPts.add(Pt(x, y, pressure, time))
-        pushRegion(lastX, lastY, x, y)
+        val l = (minOf(lastX, x) - pad).toInt()
+        val t = (minOf(lastY, y) - pad).toInt()
+        val r = (maxOf(lastX, x) + pad).toInt()
+        val b = (maxOf(lastY, y) + pad).toInt()
+        invalidate(l, t, r, b)
         lastX = x; lastY = y
-    }
-
-    /** Draw the new segment to the panel immediately; fall back to invalidate() if EPD path fails. */
-    private fun pushRegion(x0: Float, y0: Float, x1: Float, y1: Float) {
-        dirty.set(
-            (minOf(x0, x1) - pad).toInt(),
-            (minOf(y0, y1) - pad).toInt(),
-            (maxOf(x0, x1) + pad).toInt(),
-            (maxOf(y0, y1) + pad).toInt()
-        )
-        if (!Epd.repaintRegion(this, dirty)) {
-            invalidate(dirty.left, dirty.top, dirty.right, dirty.bottom)
-        }
     }
 
     fun clearPage() {
