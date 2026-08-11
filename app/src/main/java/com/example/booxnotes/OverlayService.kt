@@ -332,7 +332,7 @@ class OverlayService : Service() {
         val mlp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 140; y = anchor.y }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 200; y = anchor.y }
         wm.addView(m, mlp); menu = m
     }
 
@@ -363,10 +363,11 @@ class DotView(context: Context) : View(context) {
     private val disc = Paint().apply { isAntiAlias = true; color = Color.parseColor("#141414"); style = Paint.Style.FILL }
     private val ring = Paint().apply { isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 4f }
     private val mark = Paint().apply {
-        isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 7f; strokeCap = Paint.Cap.ROUND
+        isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 8f; strokeCap = Paint.Cap.ROUND
     }
     override fun onMeasure(w: Int, h: Int) {
-        val s = (resources.displayMetrics.density * 46).toInt(); setMeasuredDimension(s, s)
+        // 69dp = 46dp x 1.5 (50% bigger, easier to press)
+        val s = (resources.displayMetrics.density * 69).toInt(); setMeasuredDimension(s, s)
     }
     override fun onDraw(c: Canvas) {
         val cx = width / 2f; val cy = height / 2f; val r = minOf(cx, cy) - 4f
