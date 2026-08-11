@@ -22,6 +22,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.view.Gravity
@@ -47,21 +48,15 @@ class OverlayService : Service() {
     companion object {
         var instance: OverlayService? = null
         const val ACTION_SET_PROJECTION = "set_projection"
-        const val MODEL_IMAGE_WIDTH = 1300f
+        const val TARGET_WIDTH = 1300   // downscale width sent to the API
         const val DOUBLE_TAP_MS = 250L
 
         const val TEST_JSON = """
-        {
-          "annotations": [
-            { "type": "text",  "content": "Check equilibrium: kv2 = 100g/35", "x": 650, "y": 280 },
-            { "type": "cross", "x": 620, "y": 340 },
-            { "type": "text",  "content": "F = 100g sin B + kv2", "x": 650, "y": 420 },
-            { "type": "cross", "x": 550, "y": 500 },
-            { "type": "text",  "content": "P = 42V correct", "x": 450, "y": 545 },
-            { "type": "tick",  "x": 420, "y": 545 },
-            { "type": "text",  "content": "Part b: U = 1.08V checks out", "x": 650, "y": 750 }
-          ]
-        }
+        {"annotations":[
+          {"type":"text","content":"Test note","x":80,"y":180},
+          {"type":"tick","x":1180,"y":180},
+          {"type":"cross","x":1180,"y":430}
+        ]}
         """
     }
 
@@ -74,8 +69,14 @@ class OverlayService : Service() {
     private var typeface: Typeface = Typeface.SANS_SERIF
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val netThread = HandlerThread("net").apply { start() }
+    private val netHandler = Handler(netThread.looper)
+
     private var mediaProjection: MediaProjection? = null
     private var capturing = false
+
+    // Width the last sent image was scaled to, so we scale annotation coords back correctly.
+    private var lastSentWidth = TARGET_WIDTH.toFloat()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -113,9 +114,8 @@ class OverlayService : Service() {
         )
         val n = Notification.Builder(this, id)
             .setContentTitle("Claude Overlay running")
-            .setContentText("Finger-tap: capture · Double-tap: clear · Long-press: tools")
-            .setSmallIcon(android.R.drawable.ic_menu_edit)
-            .build()
+            .setContentText("Finger-tap: ask Claude · Double-tap: clear · Long-press: tools")
+            .setSmallIcon(android.R.drawable.ic_menu_edit).build()
         startForeground(1, n)
     }
 
@@ -127,16 +127,14 @@ class OverlayService : Service() {
     private fun addCanvasOverlay() {
         val view = OverlayCanvas(this, typeface)
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
-        wm.addView(view, lp)
-        canvasView = view
+        wm.addView(view, lp); canvasView = view
     }
 
     private data class Annotation(val type: String, val content: String, val x: Float, val y: Float)
@@ -160,14 +158,13 @@ class OverlayService : Service() {
             return
         }
         if (parsed.isEmpty()) {
-            mainHandler.post { Toast.makeText(this, "No annotations in reply", Toast.LENGTH_SHORT).show() }
+            mainHandler.post { Toast.makeText(this, "No annotations returned", Toast.LENGTH_SHORT).show() }
             return
         }
         val screenW = resources.displayMetrics.widthPixels.toFloat()
         val scale = screenW / sourceWidth
         val ordered = parsed.sortedWith(compareBy({ it.y }, { it.x }))
         var delay = 0L
-        val stepGap = 500L
         for (a in ordered) {
             val sx = a.x * scale; val sy = a.y * scale
             mainHandler.postDelayed({
@@ -177,7 +174,7 @@ class OverlayService : Service() {
                     "cross" -> canvasView?.addMark(OverlayCanvas.Type.CROSS, sx, sy)
                 }
             }, delay)
-            delay += stepGap
+            delay += 500L
         }
     }
 
@@ -223,46 +220,45 @@ class OverlayService : Service() {
                 val bmpW = w + rowPadding / pixelStride
                 val tmp = Bitmap.createBitmap(bmpW, h, Bitmap.Config.ARGB_8888)
                 tmp.copyPixelsFromBuffer(buffer)
-                val bmp = Bitmap.createBitmap(tmp, 0, 0, w, h)
+                val full = Bitmap.createBitmap(tmp, 0, 0, w, h)
                 image.close()
-                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val dir = getExternalFilesDir(null) ?: filesDir
-                val file = File(dir, "capture_$stamp.png")
-                FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
-                mainHandler.post { showPreview(bmp) }
+                onCaptured(full)
             } catch (e: Exception) {
                 mainHandler.post { Toast.makeText(this, "Capture failed: ${e.message}", Toast.LENGTH_LONG).show() }
             } finally { cleanup() }
         }, mainHandler)
     }
 
-    private fun showPreview(bmp: Bitmap) {
-        dismissPreview()
-        val m = resources.displayMetrics
-        val maxW = (m.widthPixels * 0.7f).toInt()
-        val scale = maxW.toFloat() / bmp.width
-        val thumb = Bitmap.createScaledBitmap(bmp, maxW, (bmp.height * scale).toInt(), true)
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#EE000000")); setPadding(16, 16, 16, 16)
+    private fun onCaptured(full: Bitmap) {
+        // Downscale to TARGET_WIDTH for the API (and record that width for coord scaling).
+        val scale = TARGET_WIDTH.toFloat() / full.width
+        val sendW = TARGET_WIDTH
+        val sendH = (full.height * scale).toInt()
+        val small = Bitmap.createScaledBitmap(full, sendW, sendH, true)
+        lastSentWidth = sendW.toFloat()
+
+        val apiKey = getSharedPreferences("cfg", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+        if (apiKey.isBlank()) {
+            mainHandler.post { Toast.makeText(this, "No API key — set it in the app first", Toast.LENGTH_LONG).show() }
+            return
         }
-        container.addView(TextView(this).apply {
-            text = "Captured — is this your notes?"
-            setTextColor(Color.WHITE); textSize = 16f; setPadding(0, 0, 0, 12)
-        })
-        container.addView(ImageView(this).apply { setImageBitmap(thumb) })
-        container.addView(Button(this).apply { text = "close"; setOnClickListener { dismissPreview() } })
-        val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.CENTER }
-        wm.addView(container, lp)
-        preview = container
+        mainHandler.post { Toast.makeText(this, "Asking Claude…", Toast.LENGTH_SHORT).show() }
+
+        netHandler.post {
+            val res = ClaudeClient.annotate(apiKey, small)
+            mainHandler.post {
+                if (res.error != null) {
+                    Toast.makeText(this, "Claude error: ${res.error}", Toast.LENGTH_LONG).show()
+                } else if (res.json != null) {
+                    renderAnnotations(res.json, lastSentWidth)
+                }
+            }
+        }
     }
 
-    private fun dismissPreview() {
-        preview?.let { runCatching { wm.removeView(it) } }; preview = null
-    }
+    private fun showPreview(bmp: Bitmap) {}  // preview removed; result now renders live
+
+    private fun dismissPreview() { preview?.let { runCatching { wm.removeView(it) } }; preview = null }
 
     private fun addDot() {
         val v = DotView(this)
@@ -273,8 +269,7 @@ class OverlayService : Service() {
 
         val slop = ViewConfiguration.get(this).scaledTouchSlop
         var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
-        var moved = false; var longFired = false
-        var pendingSingle = false
+        var moved = false; var longFired = false; var pendingSingle = false
         val longRun = Runnable { longFired = true; showMenu(lp) }
         val singleRun = Runnable { pendingSingle = false; requestCapture() }
 
@@ -295,12 +290,9 @@ class OverlayService : Service() {
                     mainHandler.removeCallbacks(longRun)
                     if (!moved && !longFired) {
                         if (pendingSingle) {
-                            pendingSingle = false
-                            mainHandler.removeCallbacks(singleRun)
-                            canvasView?.clearAll()
+                            pendingSingle = false; mainHandler.removeCallbacks(singleRun); canvasView?.clearAll()
                         } else {
-                            pendingSingle = true
-                            mainHandler.postDelayed(singleRun, DOUBLE_TAP_MS)
+                            pendingSingle = true; mainHandler.postDelayed(singleRun, DOUBLE_TAP_MS)
                         }
                     }
                     true
@@ -309,32 +301,27 @@ class OverlayService : Service() {
                 else -> false
             }
         }
-        wm.addView(v, lp)
-        dot = v
+        wm.addView(v, lp); dot = v
     }
 
     private fun showMenu(anchor: WindowManager.LayoutParams) {
         dismissMenu()
         val s = View(this).apply { setOnTouchListener { _, _ -> dismissMenu(); true } }
-        val slp = WindowManager.LayoutParams(
+        wm.addView(s, WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        )
-        wm.addView(s, slp); scrim = s
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT)); scrim = s
         val m = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#222222")); setPadding(8, 8, 8, 8)
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#222222")); setPadding(8, 8, 8, 8)
         }
         fun item(label: String, act: () -> Unit) {
             m.addView(Button(this).apply { text = label; setOnClickListener { act(); dismissMenu() } })
         }
-        item("test JSON") { renderAnnotations(TEST_JSON, 950f) }
+        item("test JSON") { renderAnnotations(TEST_JSON, TARGET_WIDTH.toFloat()) }
         item("clear") { canvasView?.clearAll() }
-        val mlp = WindowManager.LayoutParams(
+        wm.addView(m, WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 200; y = anchor.y }
-        wm.addView(m, mlp); menu = m
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 200; y = anchor.y }); menu = m
     }
 
     private fun dismissMenu() {
@@ -344,17 +331,15 @@ class OverlayService : Service() {
 
     fun setOverlayVisible(visible: Boolean) {
         val vis = if (visible) View.VISIBLE else View.INVISIBLE
-        dot?.visibility = vis
-        canvasView?.visibility = vis
-        if (!visible) { dismissMenu(); dismissPreview() }
+        dot?.visibility = vis; canvasView?.visibility = vis
+        if (!visible) { dismissMenu() }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        instance = null
-        dismissMenu(); dismissPreview()
-        runCatching { mediaProjection?.stop() }
-        mediaProjection = null
+        instance = null; dismissMenu()
+        runCatching { mediaProjection?.stop() }; mediaProjection = null
+        runCatching { netThread.quitSafely() }
         dot?.let { runCatching { wm.removeView(it) } }
         canvasView?.let { runCatching { wm.removeView(it) } }
     }
@@ -403,8 +388,7 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
         override fun run() {
             var any = false
             for (it in items) if (it.progress < 1f) { it.progress = (it.progress + STEP).coerceAtMost(1f); any = true }
-            invalidate()
-            if (any) handler.postDelayed(this, FRAME_MS) else animating = false
+            invalidate(); if (any) handler.postDelayed(this, FRAME_MS) else animating = false
         }
     }
     override fun onDraw(canvas: Canvas) {
