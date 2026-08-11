@@ -253,8 +253,7 @@ class OverlayService : Service() {
         container.addView(Button(this).apply { text = "close"; setOnClickListener { dismissPreview() } })
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.CENTER }
         wm.addView(container, lp)
         preview = container
@@ -266,17 +265,9 @@ class OverlayService : Service() {
 
     private fun addDot() {
         val v = DotView(this)
-        // Correct flag set: NOT_FOCUSABLE keeps the keyboard/focus out of it, and
-        // NOT_TOUCH_MODAL means this window ONLY receives touches that land within
-        // its own bounds — everything outside falls through to Boox Notes. This is the
-        // combo that makes the dot tappable WITHOUT hijacking the whole screen.
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 300 }
 
         val slop = ViewConfiguration.get(this).scaledTouchSlop
@@ -340,10 +331,8 @@ class OverlayService : Service() {
         item("clear") { canvasView?.clearAll() }
         val mlp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 160; y = anchor.y }
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 140; y = anchor.y }
         wm.addView(m, mlp); menu = m
     }
 
@@ -377,7 +366,7 @@ class DotView(context: Context) : View(context) {
         isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 7f; strokeCap = Paint.Cap.ROUND
     }
     override fun onMeasure(w: Int, h: Int) {
-        val s = (resources.displayMetrics.density * 60).toInt(); setMeasuredDimension(s, s)
+        val s = (resources.displayMetrics.density * 46).toInt(); setMeasuredDimension(s, s)
     }
     override fun onDraw(c: Canvas) {
         val cx = width / 2f; val cy = height / 2f; val r = minOf(cx, cy) - 4f
