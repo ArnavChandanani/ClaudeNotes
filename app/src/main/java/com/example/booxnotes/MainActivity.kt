@@ -23,10 +23,16 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.hypot
 
 /**
- * v0.2 -- pen captured via standard Android MotionEvents (confirmed working on Go 10.3).
- * Stylus only for ink; finger is left free for future pan/scroll. Vector JSON + PNG on Save.
+ * v0.3 -- latency work.
+ *  - Only the dirty rect around each segment is invalidated (not the whole screen).
+ *  - Anti-aliasing off: faster + sharper on e-ink.
+ *  - Points closer than MIN_DIST to the last kept point are dropped (fewer redraws,
+ *    no visible quality loss). Raw fidelity is unchanged in spirit; we still keep
+ *    pressure/time on the points we retain.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -90,6 +96,8 @@ class DrawView(context: Context) : View(context) {
 
     companion object {
         const val TOOLBAR_HEIGHT_PX = 130
+        const val MIN_DIST = 2.5f          // px; drop samples closer than this
+        const val STROKE_WIDTH = 3f
     }
 
     private data class Pt(val x: Float, val y: Float, val p: Float, val t: Long)
@@ -105,18 +113,20 @@ class DrawView(context: Context) : View(context) {
     private var pageBitmap: Bitmap? = null
     private var pageCanvas: Canvas? = null
 
-    private val currentWidth = 3f
     private val paint = Paint().apply {
-        isAntiAlias = true
+        isAntiAlias = false            // e-ink: hard edges are faster and sharper
+        isDither = false
         color = Color.BLACK
         style = Paint.Style.STROKE
-        strokeWidth = currentWidth
+        strokeWidth = STROKE_WIDTH
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
 
-    private var currentPath = Path()
     private var currentPts = mutableListOf<Pt>()
+    private var lastX = 0f
+    private var lastY = 0f
+    private val pad = STROKE_WIDTH * 2f  // dirty-rect padding so round caps aren't clipped
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -131,56 +141,63 @@ class DrawView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        // The committed page bitmap is the single source of truth; segments are drawn
+        // into it live, so we just blit it (respecting the current clip/dirty rect).
         pageBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
-        if (!currentPath.isEmpty) canvas.drawPath(currentPath, paint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        // Only the stylus draws. Finger is ignored here (reserved for future pan/zoom).
         if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return false
 
-        val x = event.x
-        val y = event.y
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                val x = event.x
+                val y = event.y
                 if (y < TOOLBAR_HEIGHT_PX) return false
-                currentPath = Path()
-                currentPts = mutableListOf()
-                currentPath.moveTo(x, y)
-                currentPts.add(Pt(x, y, event.pressure, event.eventTime))
-                invalidate()
+                currentPts = mutableListOf(Pt(x, y, event.pressure, event.eventTime))
+                lastX = x; lastY = y
+                // draw a dot so a tap leaves a mark
+                pageCanvas?.drawPoint(x, y, paint)
+                invalidate((x - pad).toInt(), (y - pad).toInt(), (x + pad).toInt(), (y + pad).toInt())
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                val canvas = pageCanvas ?: return true
+                // historical samples first, then the current one
                 for (h in 0 until event.historySize) {
-                    val hx = event.getHistoricalX(h)
-                    val hy = event.getHistoricalY(h)
-                    currentPath.lineTo(hx, hy)
-                    currentPts.add(Pt(hx, hy, event.getHistoricalPressure(h), event.getHistoricalEventTime(h)))
+                    addSegment(canvas, event.getHistoricalX(h), event.getHistoricalY(h),
+                        event.getHistoricalPressure(h), event.getHistoricalEventTime(h))
                 }
-                currentPath.lineTo(x, y)
-                currentPts.add(Pt(x, y, event.pressure, event.eventTime))
-                invalidate()
+                addSegment(canvas, event.x, event.y, event.pressure, event.eventTime)
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                pageCanvas?.drawPath(currentPath, paint)
                 if (currentPts.isNotEmpty()) {
-                    strokes.add(Stroke("pen", "#000000", currentWidth, currentPts.toList()))
+                    strokes.add(Stroke("pen", "#000000", STROKE_WIDTH, currentPts.toList()))
                 }
-                currentPath = Path()
                 currentPts = mutableListOf()
-                invalidate()
                 return true
             }
         }
         return false
     }
 
+    private fun addSegment(canvas: Canvas, x: Float, y: Float, pressure: Float, time: Long) {
+        if (hypot(x - lastX, y - lastY) < MIN_DIST) return
+        canvas.drawLine(lastX, lastY, x, y, paint)
+        currentPts.add(Pt(x, y, pressure, time))
+        // invalidate only the bounding box of this segment
+        val l = (minOf(lastX, x) - pad).toInt()
+        val t = (minOf(lastY, y) - pad).toInt()
+        val r = (maxOf(lastX, x) + pad).toInt()
+        val b = (maxOf(lastY, y) + pad).toInt()
+        invalidate(l, t, r, b)
+        lastX = x; lastY = y
+    }
+
     fun clearPage() {
         strokes.clear()
         pageCanvas?.drawColor(Color.WHITE)
-        currentPath = Path()
         currentPts = mutableListOf()
         invalidate()
     }
