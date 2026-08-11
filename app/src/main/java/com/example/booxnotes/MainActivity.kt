@@ -25,10 +25,8 @@ import java.util.Locale
 import kotlin.math.hypot
 
 /**
- * v0.5 -- correct rendering (invalidate dirty rect) + automatic A2 fast mode.
- * The broken "push straight to panel instead of drawing" path from v0.4 is gone:
- * the EPD refresh never ran onDraw, so the framebuffer stayed empty. We always
- * invalidate now; speed comes from applyApplicationFastMode, not from skipping draws.
+ * v0.6 -- programmatic EpdController removed (it regressed refresh on this Qualcomm
+ * device). Clean rendering only; speed comes from the manual E-Ink Center A2 mode.
  */
 class MainActivity : AppCompatActivity() {
 
@@ -36,7 +34,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Epd.applyFastMode(this)
         val root = FrameLayout(this)
         drawView = DrawView(this)
         root.addView(
@@ -48,11 +45,6 @@ class MainActivity : AppCompatActivity() {
         )
         root.addView(buildToolbar())
         setContentView(root)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        Epd.clearFastMode(this)
     }
 
     private fun buildToolbar(): LinearLayout {
@@ -86,25 +78,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-}
-
-/** Reflection-guarded EpdController: applies A2 for the whole app; no-op if unavailable. */
-object Epd {
-    private fun controller(): Class<*>? = try {
-        Class.forName("com.onyx.android.sdk.device.EpdController")
-    } catch (e: Throwable) { null }
-
-    private fun setFast(pkg: String, enable: Boolean) {
-        try {
-            controller()?.getMethod(
-                "applyApplicationFastMode",
-                String::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType
-            )?.invoke(null, pkg, enable, true)
-        } catch (e: Throwable) { /* firmware lacks it -> normal refresh */ }
-    }
-
-    fun applyFastMode(ctx: Context) = setFast(ctx.packageName, true)
-    fun clearFastMode(ctx: Context) = setFast(ctx.packageName, false)
 }
 
 class DrawView(context: Context) : View(context) {

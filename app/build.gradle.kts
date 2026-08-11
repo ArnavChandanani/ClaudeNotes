@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.booxnotes"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.5"
+        versionCode = 6
+        versionName = "0.6"
     }
 
     compileOptions {
@@ -22,20 +22,9 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-
-    packaging {
-        jniLibs {
-            pickFirsts += "**/libc++_shared.so"
-        }
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
-    }
 }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    // Display-side Onyx SDK (EpdController fast mode only).
-    implementation("com.onyx.android.sdk:onyxsdk-device:1.2.31")
 }
