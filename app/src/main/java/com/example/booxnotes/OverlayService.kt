@@ -53,12 +53,13 @@ class OverlayService : Service() {
         const val TEST_JSON = """
         {
           "annotations": [
-            { "type": "text",  "content": "Good start", "x": 80,  "y": 180 },
-            { "type": "tick",  "x": 1180, "y": 180 },
-            { "type": "cross", "x": 1180, "y": 430 },
-            { "type": "text",  "content": "Recheck this line", "x": 80, "y": 430 },
-            { "type": "text",  "content": "Nicely done!", "x": 80, "y": 700 },
-            { "type": "tick",  "x": 1180, "y": 700 }
+            { "type": "text",  "content": "Check equilibrium: kv2 = 100g/35", "x": 650, "y": 280 },
+            { "type": "cross", "x": 620, "y": 340 },
+            { "type": "text",  "content": "F = 100g sin B + kv2", "x": 650, "y": 420 },
+            { "type": "cross", "x": 550, "y": 500 },
+            { "type": "text",  "content": "P = 42V correct", "x": 450, "y": 545 },
+            { "type": "tick",  "x": 420, "y": 545 },
+            { "type": "text",  "content": "Part b: U = 1.08V checks out", "x": 650, "y": 750 }
           ]
         }
         """
@@ -327,7 +328,7 @@ class OverlayService : Service() {
         fun item(label: String, act: () -> Unit) {
             m.addView(Button(this).apply { text = label; setOnClickListener { act(); dismissMenu() } })
         }
-        item("test JSON") { renderAnnotations(TEST_JSON, MODEL_IMAGE_WIDTH) }
+        item("test JSON") { renderAnnotations(TEST_JSON, 950f) }
         item("clear") { canvasView?.clearAll() }
         val mlp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
