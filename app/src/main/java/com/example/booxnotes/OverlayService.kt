@@ -27,28 +27,21 @@ import android.widget.TextView
 
 class OverlayService : Service() {
 
+    companion object { var instance: OverlayService? = null }
+
     private lateinit var wm: WindowManager
     private var panel: LinearLayout? = null
     private var canvasView: OverlayCanvas? = null
     private var typeface: Typeface = Typeface.SANS_SERIF
-
-    private val samples = listOf(
-        "Lovely handwriting!",
-        "Great point here.",
-        "Check this again.",
-        "Nicely done.",
-        "Claude was here."
-    )
-    private var sampleIndex = 0
     private var placed = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         startForegroundNotice()
-        typeface = runCatching { Typeface.createFromAsset(assets, "handwriting.ttf") }
-            .getOrDefault(Typeface.SANS_SERIF)
+        typeface = runCatching { Typeface.createFromAsset(assets, "handwriting.ttf") }.getOrDefault(Typeface.SANS_SERIF)
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         addCanvasOverlay()
         addPanel()
@@ -59,9 +52,9 @@ class OverlayService : Service() {
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(id, "Overlay", NotificationManager.IMPORTANCE_MIN)
         )
-        val n: Notification = Notification.Builder(this, id)
+        val n = Notification.Builder(this, id)
             .setContentTitle("Claude Overlay running")
-            .setContentText("Use the panel to write over your notes")
+            .setContentText("Use the panel to write / capture")
             .setSmallIcon(android.R.drawable.ic_menu_edit)
             .build()
         startForeground(1, n)
@@ -94,13 +87,28 @@ class OverlayService : Service() {
         return x to y
     }
 
+    /** Tool-agnostic tap: fires on ACTION_UP for stylus AND finger. */
+    private fun Button.onAnyTap(action: () -> Unit) {
+        setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> { v.isPressed = true; true }
+                MotionEvent.ACTION_UP -> {
+                    v.isPressed = false
+                    if (e.x >= 0 && e.y >= 0 && e.x <= v.width && e.y <= v.height) action()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> { v.isPressed = false; true }
+                else -> true
+            }
+        }
+    }
+
     private fun addPanel() {
         val p = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.parseColor("#222222"))
             setPadding(8, 8, 8, 8)
         }
-
         val handle = TextView(this).apply {
             text = "drag"
             setTextColor(Color.WHITE)
@@ -111,24 +119,17 @@ class OverlayService : Service() {
         p.addView(handle)
 
         fun mkBtn(label: String, action: () -> Unit): Button =
-            Button(this).apply { text = label; setOnClickListener { action() } }
+            Button(this).apply { text = label; onAnyTap(action) }
 
         p.addView(mkBtn("write") {
-            val (x, y) = nextPos()
-            canvasView?.addText(samples[sampleIndex % samples.size], x, y)
-            sampleIndex++
+            val (x, y) = nextPos(); canvasView?.addText("Nicely written!", x, y)
         })
-        p.addView(mkBtn("tick") {
-            val (x, y) = nextPos()
-            canvasView?.addMark(OverlayCanvas.Type.TICK, x, y)
+        p.addView(mkBtn("tick") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.TICK, x, y) })
+        p.addView(mkBtn("cross") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.CROSS, x, y) })
+        p.addView(mkBtn("capture") {
+            startActivity(Intent(this, CaptureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         })
-        p.addView(mkBtn("cross") {
-            val (x, y) = nextPos()
-            canvasView?.addMark(OverlayCanvas.Type.CROSS, x, y)
-        })
-        p.addView(mkBtn("clear") {
-            canvasView?.clearAll(); placed = 0
-        })
+        p.addView(mkBtn("clear") { canvasView?.clearAll(); placed = 0 })
 
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -150,13 +151,26 @@ class OverlayService : Service() {
                 else -> false
             }
         }
-
         wm.addView(p, lp)
         panel = p
     }
 
+    /** Hide our overlays so screen capture sees only the app underneath. */
+    fun setOverlayVisible(visible: Boolean) {
+        val v = if (visible) View.VISIBLE else View.INVISIBLE
+        panel?.visibility = v
+        canvasView?.visibility = v
+    }
+
+    /** Placeholder for the eventual model reply. */
+    fun writeStub() {
+        val (x, y) = nextPos()
+        canvasView?.addText("Claude: (reply goes here)", x, y)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        instance = null
         panel?.let { runCatching { wm.removeView(it) } }
         canvasView?.let { runCatching { wm.removeView(it) } }
     }
@@ -165,14 +179,11 @@ class OverlayService : Service() {
 class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
 
     enum class Type { TEXT, TICK, CROSS }
-
-    private class Item(val type: Type, val text: String, val x: Float, val y: Float) {
-        var progress = 0f
-    }
+    private class Item(val type: Type, val text: String, val x: Float, val y: Float) { var progress = 0f }
 
     companion object {
         const val FRAME_MS = 40L
-        const val STEP = 0.14f
+        const val STEP = 0.045f   // slower = more aesthetic (and less e-ink ghosting)
     }
 
     private val items = mutableListOf<Item>()
@@ -180,35 +191,26 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
     private var animating = false
 
     private val textPaint = Paint().apply {
-        isAntiAlias = true
-        color = Color.BLACK
-        textSize = 58f
-        this.typeface = typeface
+        isAntiAlias = true; color = Color.BLACK; textSize = 60f; this.typeface = typeface
     }
     private val markPaint = Paint().apply {
-        isAntiAlias = true
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeWidth = 9f
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
+        isAntiAlias = true; color = Color.BLACK; style = Paint.Style.STROKE
+        strokeWidth = 9f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
     }
     private val measure = PathMeasure()
+
+    private fun ease(p: Float): Float = p * p * (3f - 2f * p)  // smoothstep
 
     fun addText(text: String, x: Float, y: Float) { items.add(Item(Type.TEXT, text, x, y)); start() }
     fun addMark(type: Type, x: Float, y: Float) { items.add(Item(type, "", x, y)); start() }
     fun clearAll() { items.clear(); invalidate() }
 
-    private fun start() {
-        if (!animating) { animating = true; handler.post(loop) } else invalidate()
-    }
+    private fun start() { if (!animating) { animating = true; handler.post(loop) } else invalidate() }
 
     private val loop = object : Runnable {
         override fun run() {
             var any = false
-            for (it in items) if (it.progress < 1f) {
-                it.progress = (it.progress + STEP).coerceAtMost(1f); any = true
-            }
+            for (it in items) if (it.progress < 1f) { it.progress = (it.progress + STEP).coerceAtMost(1f); any = true }
             invalidate()
             if (any) handler.postDelayed(this, FRAME_MS) else animating = false
         }
@@ -224,11 +226,14 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
     }
 
     private fun drawText(canvas: Canvas, it: Item) {
+        val e = ease(it.progress)
         val full = textPaint.measureText(it.text)
+        textPaint.alpha = (60 + 195 * e).toInt().coerceIn(0, 255)
         canvas.save()
-        canvas.clipRect(it.x, it.y - 70f, it.x + full * it.progress, it.y + 24f)
+        canvas.clipRect(it.x, it.y - 72f, it.x + full * e, it.y + 26f)
         canvas.drawText(it.text, it.x, it.y, textPaint)
         canvas.restore()
+        textPaint.alpha = 255
     }
 
     private fun drawTick(canvas: Canvas, it: Item) {
@@ -238,15 +243,16 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
             lineTo(it.x + s * 0.35f, it.y + s * 0.42f)
             lineTo(it.x + s, it.y - s * 0.5f)
         }
-        drawPartial(canvas, p, it.progress)
+        drawPartial(canvas, p, ease(it.progress))
     }
 
     private fun drawCross(canvas: Canvas, it: Item) {
         val s = 46f
         val a = Path().apply { moveTo(it.x, it.y - s / 2); lineTo(it.x + s, it.y + s / 2) }
         val b = Path().apply { moveTo(it.x + s, it.y - s / 2); lineTo(it.x, it.y + s / 2) }
-        drawPartial(canvas, a, (it.progress * 2f).coerceAtMost(1f))
-        if (it.progress > 0.5f) drawPartial(canvas, b, ((it.progress - 0.5f) * 2f).coerceAtMost(1f))
+        val e = ease(it.progress)
+        drawPartial(canvas, a, (e * 2f).coerceAtMost(1f))
+        if (e > 0.5f) drawPartial(canvas, b, ((e - 0.5f) * 2f).coerceAtMost(1f))
     }
 
     private fun drawPartial(canvas: Canvas, path: Path, progress: Float) {
