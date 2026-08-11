@@ -8,24 +8,28 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
-/**
- * Minimal Anthropic Messages API client for a single image + prompt -> text reply.
- * Runs on a background thread (caller must not be on the main thread).
- * Key is passed in per-call; never stored here, never logged.
- */
 object ClaudeClient {
 
     private const val MODEL = "claude-haiku-4-5"
     private const val ENDPOINT = "https://api.anthropic.com/v1/messages"
 
-    fun promptFor(w: Int, h: Int): String = """
-You annotate a photo of handwritten notes. The image is $w pixels wide and $h pixels tall.
+    val PROMPT = """
+You look at a photo of handwritten notes and annotate it.
 
-If a line starts with "@", treat that whole line as a command to you (not content to grade) and do what it asks; never mark an "@" line. Otherwise, verify the work: tick correct items, cross clear errors, and add a short note where something needs fixing. If you are unsure whether something is wrong, add a note rather than a cross.
+STEP 1 — Check for an instruction to you:
+Look for a line that starts with "@". That line is a command addressed to YOU, not part of the notes to grade.
+- If an "@" line exists: do exactly what it asks (e.g. add a note, answer a question). Do NOT add ticks or crosses. Do NOT mark the "@" line itself.
+- If there is NO "@" line: verify the work — tick correct items, cross clear mistakes, add short notes where needed.
+
+STEP 2 — Position everything on a GRID:
+The page is divided into 20 rows (1=top ... 20=bottom) and 5 columns (1=far left ... 5=far right).
+For each annotation, give the row and column of an EMPTY cell near what it refers to. Never place a mark on top of writing — pick a nearby blank cell (often the right columns 4-5, or an empty row between lines).
 
 Reply with ONLY this JSON, nothing else:
-{"annotations":[{"type":"text","content":"...","x":<int>,"y":<int>},{"type":"tick","x":<int>,"y":<int>},{"type":"cross","x":<int>,"y":<int>}]}
-x,y are pixel positions in THIS image; origin top-left; x in 0..$w, y in 0..$h. Use integer pixels, not percentages. Put each mark in empty space near what it refers to; prefer the right margin for ticks/crosses and gaps between lines for notes; never cover handwriting. Keep content to a few words. Output nothing outside the JSON.
+{"annotations":[{"type":"text","content":"...","row":<1-20>,"col":<1-5>},{"type":"tick","row":<1-20>,"col":<1-5>},{"type":"cross","row":<1-20>,"col":<1-5>}]}
+- type is "text", "tick", or "cross"; only "text" has "content".
+- row is 1-20, col is 1-5, both integers.
+- Keep content to a few words. Output nothing outside the JSON.
 """.trim()
 
     data class Result(val json: String?, val error: String?)
@@ -50,17 +54,15 @@ x,y are pixel positions in THIS image; origin top-left; x in 0..$w, y in 0..$h. 
                 })
                 content.put(JSONObject().apply {
                     put("type", "text")
-                    put("text", promptFor(image.width, image.height))
+                    put("text", PROMPT)
                 })
                 val msg = JSONObject().apply { put("role", "user"); put("content", content) }
                 put("messages", JSONArray().put(msg))
             }
 
             val conn = (URL(ENDPOINT).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                doOutput = true
-                connectTimeout = 30000
-                readTimeout = 60000
+                requestMethod = "POST"; doOutput = true
+                connectTimeout = 30000; readTimeout = 60000
                 setRequestProperty("content-type", "application/json")
                 setRequestProperty("x-api-key", apiKey)
                 setRequestProperty("anthropic-version", "2023-06-01")
@@ -70,10 +72,16 @@ x,y are pixel positions in THIS image; origin top-left; x in 0..$w, y in 0..$h. 
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val resp = stream.bufferedReader().use { it.readText() }
+            if (code !in 200..299) {
+                val safe = when (code) {
+                    401 -> "auth failed (401) — check your API key"
+                    403 -> "forbidden (403) — key revoked or no access"
+                    429 -> "rate limited (429)"
+                    else -> "HTTP $code"
+                }
+                return Result(null, safe)
+            }
 
-            if (code !in 200..299) return Result(null, "HTTP $code: ${resp.take(300)}")
-
-            // Extract the text block from the response content array.
             val obj = JSONObject(resp)
             val contentArr = obj.getJSONArray("content")
             val sb = StringBuilder()

@@ -53,9 +53,9 @@ class OverlayService : Service() {
 
         const val TEST_JSON = """
         {"annotations":[
-          {"type":"text","content":"Test note","x":80,"y":180},
-          {"type":"tick","x":1180,"y":180},
-          {"type":"cross","x":1180,"y":430}
+          {"type":"text","content":"Test note","row":3,"col":1},
+          {"type":"tick","row":3,"col":5},
+          {"type":"cross","row":8,"col":5}
         ]}
         """
     }
@@ -137,10 +137,14 @@ class OverlayService : Service() {
         wm.addView(view, lp); canvasView = view
     }
 
-    private data class Annotation(val type: String, val content: String, val x: Float, val y: Float)
+    private data class Annotation(val type: String, val content: String, val row: Int, val col: Int)
 
-    fun renderAnnotations(rawJson: String, sourceWidth: Float) {
-        val cleaned = rawJson.replace("```json", "").replace("```", "").trim()
+    fun renderAnnotations(rawJson: String) {
+        val cleaned = rawJson
+            .replace("\r", "")
+            .replace("```json", "")
+            .replace("```", "")
+            .trim()
         val parsed = try {
             val obj = JSONObject(cleaned.substring(cleaned.indexOf('{'), cleaned.lastIndexOf('}') + 1))
             val arr = obj.getJSONArray("annotations")
@@ -149,8 +153,9 @@ class OverlayService : Service() {
                 val a = arr.getJSONObject(i)
                 val type = a.optString("type", "").lowercase()
                 if (type.isEmpty()) continue
-                list.add(Annotation(type, a.optString("content", ""),
-                    a.optDouble("x", 0.0).toFloat(), a.optDouble("y", 0.0).toFloat()))
+                val row = a.optInt("row", 1).coerceIn(1, 20)
+                val col = a.optInt("col", 3).coerceIn(1, 5)
+                list.add(Annotation(type, a.optString("content", ""), row, col))
             }
             list
         } catch (e: Exception) {
@@ -162,14 +167,16 @@ class OverlayService : Service() {
             return
         }
         val screenW = resources.displayMetrics.widthPixels.toFloat()
-        val scale = screenW / sourceWidth
-        val ordered = parsed.sortedWith(compareBy({ it.y }, { it.x }))
+        val screenH = resources.displayMetrics.heightPixels.toFloat()
+        val ordered = parsed.sortedWith(compareBy({ it.row }, { it.col }))
         var delay = 0L
         for (a in ordered) {
-            val sx = a.x * scale; val sy = a.y * scale
+            // grid cell -> pixel center
+            val sx = (a.col - 0.5f) * screenW / 5f
+            val sy = (a.row - 0.5f) * screenH / 20f
             mainHandler.postDelayed({
                 when (a.type) {
-                    "text"  -> canvasView?.addText(a.content, sx, sy)
+                    "text"  -> canvasView?.addText(a.content, (sx - 120f).coerceAtLeast(20f), sy)
                     "tick"  -> canvasView?.addMark(OverlayCanvas.Type.TICK, sx, sy)
                     "cross" -> canvasView?.addMark(OverlayCanvas.Type.CROSS, sx, sy)
                 }
@@ -250,7 +257,7 @@ class OverlayService : Service() {
                 if (res.error != null) {
                     Toast.makeText(this, "Claude error: ${res.error}", Toast.LENGTH_LONG).show()
                 } else if (res.json != null) {
-                    renderAnnotations(res.json, lastSentWidth)
+                    renderAnnotations(res.json)
                 }
             }
         }
@@ -316,7 +323,7 @@ class OverlayService : Service() {
         fun item(label: String, act: () -> Unit) {
             m.addView(Button(this).apply { text = label; setOnClickListener { act(); dismissMenu() } })
         }
-        item("test JSON") { renderAnnotations(TEST_JSON, TARGET_WIDTH.toFloat()) }
+        item("test JSON") { renderAnnotations(TEST_JSON) }
         item("clear") { canvasView?.clearAll() }
         wm.addView(m, WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
