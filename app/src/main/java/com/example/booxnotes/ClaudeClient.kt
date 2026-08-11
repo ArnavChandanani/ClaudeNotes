@@ -14,21 +14,22 @@ object ClaudeClient {
     private const val ENDPOINT = "https://api.anthropic.com/v1/messages"
 
     val PROMPT = """
-You look at a photo of handwritten notes and annotate it.
+You look at a photo of handwritten notes and respond with annotations.
 
-STEP 1 — Check for an instruction to you:
-Look for a line that starts with "@". That line is a command addressed to YOU, not part of the notes to grade.
-- If an "@" line exists: do exactly what it asks (e.g. add a note, answer a question). Do NOT add ticks or crosses. Do NOT mark the "@" line itself.
-- If there is NO "@" line: verify the work — tick correct items, cross clear mistakes, add short notes where needed.
+FIRST, decide the mode. This is the most important rule:
+- Look for any line starting with "@". The "@" line is a command addressed to YOU.
+- IF an "@" line exists: do ONLY what that line asks. Do NOT grade. Do NOT add any ticks or crosses. Do NOT mark the "@" line. Produce only the annotation(s) that fulfil the request.
+- IF there is NO "@" line: grade the work — tick correct items, cross clear mistakes, add short notes where useful.
 
-STEP 2 — Position everything on a GRID:
-The page is divided into 20 rows (1=top ... 20=bottom) and 5 columns (1=far left ... 5=far right).
-For each annotation, give the row and column of an EMPTY cell near what it refers to. Never place a mark on top of writing — pick a nearby blank cell (often the right columns 4-5, or an empty row between lines).
+Never do both. If "@" is present, you are answering the user, not marking their work.
+
+POSITION each annotation by band — which third of the page it relates to: "top", "middle", or "bottom".
 
 Reply with ONLY this JSON, nothing else:
-{"annotations":[{"type":"text","content":"...","row":<1-20>,"col":<1-5>},{"type":"tick","row":<1-20>,"col":<1-5>},{"type":"cross","row":<1-20>,"col":<1-5>}]}
+{"annotations":[{"type":"text","content":"...","band":"top|middle|bottom"},{"type":"tick","band":"top|middle|bottom"},{"type":"cross","band":"top|middle|bottom"}]}
 - type is "text", "tick", or "cross"; only "text" has "content".
-- row is 1-20, col is 1-5, both integers.
+- band is exactly one of: top, middle, bottom.
+- List annotations in reading order (top first).
 - Keep content to a few words. Output nothing outside the JSON.
 """.trim()
 
@@ -53,11 +54,11 @@ Reply with ONLY this JSON, nothing else:
                     })
                 })
                 content.put(JSONObject().apply {
-                    put("type", "text")
-                    put("text", PROMPT)
+                    put("type", "text"); put("text", PROMPT)
                 })
-                val msg = JSONObject().apply { put("role", "user"); put("content", content) }
-                put("messages", JSONArray().put(msg))
+                put("messages", JSONArray().put(JSONObject().apply {
+                    put("role", "user"); put("content", content)
+                }))
             }
 
             val conn = (URL(ENDPOINT).openConnection() as HttpURLConnection).apply {

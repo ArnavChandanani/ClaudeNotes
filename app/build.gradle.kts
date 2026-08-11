@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.claudeoverlay"
         minSdk = 26
         targetSdk = 31
-        versionCode = 23
-        versionName = "2.3"
+        versionCode = 30
+        versionName = "3.0"
     }
 
     compileOptions {

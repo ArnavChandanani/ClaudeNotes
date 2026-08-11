@@ -31,13 +31,10 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -48,14 +45,15 @@ class OverlayService : Service() {
     companion object {
         var instance: OverlayService? = null
         const val ACTION_SET_PROJECTION = "set_projection"
-        const val TARGET_WIDTH = 1300   // downscale width sent to the API
+        const val TARGET_WIDTH = 1300
         const val DOUBLE_TAP_MS = 250L
 
         const val TEST_JSON = """
         {"annotations":[
-          {"type":"text","content":"Test note","row":3,"col":1},
-          {"type":"tick","row":3,"col":5},
-          {"type":"cross","row":8,"col":5}
+          {"type":"text","content":"Good working","band":"top"},
+          {"type":"tick","band":"top"},
+          {"type":"cross","band":"middle"},
+          {"type":"text","content":"Recheck this","band":"bottom"}
         ]}
         """
     }
@@ -64,7 +62,6 @@ class OverlayService : Service() {
     private var dot: DotView? = null
     private var menu: View? = null
     private var scrim: View? = null
-    private var preview: View? = null
     private var canvasView: OverlayCanvas? = null
     private var typeface: Typeface = Typeface.SANS_SERIF
 
@@ -74,9 +71,6 @@ class OverlayService : Service() {
 
     private var mediaProjection: MediaProjection? = null
     private var capturing = false
-
-    // Width the last sent image was scaled to, so we scale annotation coords back correctly.
-    private var lastSentWidth = TARGET_WIDTH.toFloat()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -137,25 +131,19 @@ class OverlayService : Service() {
         wm.addView(view, lp); canvasView = view
     }
 
-    private data class Annotation(val type: String, val content: String, val row: Int, val col: Int)
+    private data class Ann(val type: String, val content: String, val band: String)
 
     fun renderAnnotations(rawJson: String) {
-        val cleaned = rawJson
-            .replace("\r", "")
-            .replace("```json", "")
-            .replace("```", "")
-            .trim()
+        val cleaned = rawJson.replace("\r", "").replace("```json", "").replace("```", "").trim()
         val parsed = try {
             val obj = JSONObject(cleaned.substring(cleaned.indexOf('{'), cleaned.lastIndexOf('}') + 1))
             val arr = obj.getJSONArray("annotations")
-            val list = ArrayList<Annotation>()
+            val list = ArrayList<Ann>()
             for (i in 0 until arr.length()) {
                 val a = arr.getJSONObject(i)
                 val type = a.optString("type", "").lowercase()
                 if (type.isEmpty()) continue
-                val row = a.optInt("row", 1).coerceIn(1, 20)
-                val col = a.optInt("col", 3).coerceIn(1, 5)
-                list.add(Annotation(type, a.optString("content", ""), row, col))
+                list.add(Ann(type, a.optString("content", ""), a.optString("band", "middle").lowercase()))
             }
             list
         } catch (e: Exception) {
@@ -166,19 +154,27 @@ class OverlayService : Service() {
             mainHandler.post { Toast.makeText(this, "No annotations returned", Toast.LENGTH_SHORT).show() }
             return
         }
+
         val screenW = resources.displayMetrics.widthPixels.toFloat()
         val screenH = resources.displayMetrics.heightPixels.toFloat()
-        val ordered = parsed.sortedWith(compareBy({ it.row }, { it.col }))
+        val markX = screenW - 130f
+        val textX = screenW * 0.42f
+        fun bandOrder(b: String) = when (b) { "top" -> 0; "middle" -> 1; else -> 2 }
+        val ordered = parsed.sortedBy { bandOrder(it.band) }
+        val bandTopY = mapOf("top" to screenH * 0.18f, "middle" to screenH * 0.5f, "bottom" to screenH * 0.82f)
+        val counts = HashMap<String, Int>()
+
         var delay = 0L
         for (a in ordered) {
-            // grid cell -> pixel center
-            val sx = (a.col - 0.5f) * screenW / 5f
-            val sy = (a.row - 0.5f) * screenH / 20f
+            val n = counts.getOrDefault(a.band, 0)
+            counts[a.band] = n + 1
+            val baseY = bandTopY[a.band] ?: (screenH * 0.5f)
+            val y = baseY + n * 110f
             mainHandler.postDelayed({
                 when (a.type) {
-                    "text"  -> canvasView?.addText(a.content, (sx - 120f).coerceAtLeast(20f), sy)
-                    "tick"  -> canvasView?.addMark(OverlayCanvas.Type.TICK, sx, sy)
-                    "cross" -> canvasView?.addMark(OverlayCanvas.Type.CROSS, sx, sy)
+                    "text"  -> canvasView?.addText(a.content, textX, y)
+                    "tick"  -> canvasView?.addMark(OverlayCanvas.Type.TICK, markX, y)
+                    "cross" -> canvasView?.addMark(OverlayCanvas.Type.CROSS, markX, y)
                 }
             }, delay)
             delay += 500L
@@ -237,35 +233,22 @@ class OverlayService : Service() {
     }
 
     private fun onCaptured(full: Bitmap) {
-        // Downscale to TARGET_WIDTH for the API (and record that width for coord scaling).
         val scale = TARGET_WIDTH.toFloat() / full.width
-        val sendW = TARGET_WIDTH
-        val sendH = (full.height * scale).toInt()
-        val small = Bitmap.createScaledBitmap(full, sendW, sendH, true)
-        lastSentWidth = sendW.toFloat()
-
+        val small = Bitmap.createScaledBitmap(full, TARGET_WIDTH, (full.height * scale).toInt(), true)
         val apiKey = getSharedPreferences("cfg", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
         if (apiKey.isBlank()) {
             mainHandler.post { Toast.makeText(this, "No API key — set it in the app first", Toast.LENGTH_LONG).show() }
             return
         }
         mainHandler.post { Toast.makeText(this, "Asking Claude…", Toast.LENGTH_SHORT).show() }
-
         netHandler.post {
             val res = ClaudeClient.annotate(apiKey, small)
             mainHandler.post {
-                if (res.error != null) {
-                    Toast.makeText(this, "Claude error: ${res.error}", Toast.LENGTH_LONG).show()
-                } else if (res.json != null) {
-                    renderAnnotations(res.json)
-                }
+                if (res.error != null) Toast.makeText(this, "Claude error: ${res.error}", Toast.LENGTH_LONG).show()
+                else if (res.json != null) renderAnnotations(res.json)
             }
         }
     }
-
-    private fun showPreview(bmp: Bitmap) {}  // preview removed; result now renders live
-
-    private fun dismissPreview() { preview?.let { runCatching { wm.removeView(it) } }; preview = null }
 
     private fun addDot() {
         val v = DotView(this)
@@ -339,7 +322,7 @@ class OverlayService : Service() {
     fun setOverlayVisible(visible: Boolean) {
         val vis = if (visible) View.VISIBLE else View.INVISIBLE
         dot?.visibility = vis; canvasView?.visibility = vis
-        if (!visible) { dismissMenu() }
+        if (!visible) dismissMenu()
     }
 
     override fun onDestroy() {
