@@ -23,7 +23,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(70, 130, 70, 70)
         }
         root.addView(TextView(this).apply {
-            text = "CLAUDE OVERLAY  v1.0"
+            text = "CLAUDE OVERLAY  v2.1"
             textSize = 24f
             setTextColor(Color.BLACK)
         })
@@ -59,7 +59,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         val ok = Settings.canDrawOverlays(this)
-        status.text = if (ok) "Overlay permission: GRANTED\nStart overlay, open Boox Notes, use the panel."
+        status.text = if (ok) "Overlay permission: GRANTED\nStart overlay, open Boox Notes.\nFinger-tap dot: capture · Double-tap: clear · Long-press: tools"
         else "Overlay permission: NOT granted\nTap step 1 and enable it for Claude Overlay."
         status.setTextColor(if (ok) Color.rgb(0, 130, 0) else Color.rgb(180, 0, 0))
     }
