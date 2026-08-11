@@ -1,11 +1,13 @@
 package com.example.booxnotes
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -13,6 +15,11 @@ import android.graphics.Path
 import android.graphics.PathMeasure
 import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -24,20 +31,32 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.Toast
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.abs
 
 class OverlayService : Service() {
 
-    companion object { var instance: OverlayService? = null }
+    companion object {
+        var instance: OverlayService? = null
+        const val ACTION_SET_PROJECTION = "set_projection"
+    }
 
     private lateinit var wm: WindowManager
     private var dot: DotView? = null
-    private var dotLp: WindowManager.LayoutParams? = null
     private var menu: View? = null
     private var scrim: View? = null
     private var canvasView: OverlayCanvas? = null
     private var typeface: Typeface = Typeface.SANS_SERIF
     private var placed = 0
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var mediaProjection: MediaProjection? = null
+    private var capturing = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -49,6 +68,23 @@ class OverlayService : Service() {
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         addCanvasOverlay()
         addDot()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_SET_PROJECTION) {
+            val code = intent.getIntExtra("code", Activity.RESULT_CANCELED)
+            @Suppress("DEPRECATION")
+            val data = intent.getParcelableExtra<Intent>("data")
+            if (code == Activity.RESULT_OK && data != null) {
+                val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                mediaProjection = mpm.getMediaProjection(code, data)
+                mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                    override fun onStop() { mediaProjection = null }
+                }, mainHandler)
+                doCapture()
+            }
+        }
+        return START_STICKY
     }
 
     private fun startForegroundNotice() {
@@ -91,8 +127,79 @@ class OverlayService : Service() {
         return x to y
     }
 
-    private fun capture() {
-        startActivity(Intent(this, CaptureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    /** Reuse the live projection if we have one; otherwise ask permission once. */
+    private fun requestCapture() {
+        if (mediaProjection != null) doCapture()
+        else startActivity(Intent(this, CaptureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
+    private fun doCapture() {
+        val mp = mediaProjection ?: return
+        if (capturing) return
+        capturing = true
+        setOverlayVisible(false)
+        mainHandler.postDelayed({ grabFrame(mp) }, 250)
+    }
+
+    private fun grabFrame(mp: MediaProjection) {
+        val m = resources.displayMetrics
+        val w = m.widthPixels; val h = m.heightPixels; val dpi = m.densityDpi
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        var vd: VirtualDisplay? = null
+        var done = false
+
+        fun cleanup() {
+            runCatching { vd?.release() }
+            runCatching { reader.close() }
+            capturing = false
+            setOverlayVisible(true)
+        }
+
+        try {
+            vd = mp.createVirtualDisplay(
+                "cap", w, h, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface, null, null
+            )
+        } catch (e: Exception) {
+            // projection likely invalidated; drop it and re-request next time
+            mediaProjection = null
+            cleanup()
+            mainHandler.post { Toast.makeText(this, "Capture session lost — tap again", Toast.LENGTH_SHORT).show() }
+            return
+        }
+
+        reader.setOnImageAvailableListener({ r ->
+            if (done) return@setOnImageAvailableListener
+            val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+            done = true
+            try {
+                val plane = image.planes[0]
+                val buffer = plane.buffer
+                val pixelStride = plane.pixelStride
+                val rowStride = plane.rowStride
+                val rowPadding = rowStride - pixelStride * w
+                val bmpW = w + rowPadding / pixelStride
+                val tmp = Bitmap.createBitmap(bmpW, h, Bitmap.Config.ARGB_8888)
+                tmp.copyPixelsFromBuffer(buffer)
+                val bmp = Bitmap.createBitmap(tmp, 0, 0, w, h)
+                image.close()
+
+                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                val dir = getExternalFilesDir(null) ?: filesDir
+                val file = File(dir, "capture_$stamp.png")
+                FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+
+                mainHandler.post {
+                    Toast.makeText(this, "Captured -> ${file.name}", Toast.LENGTH_SHORT).show()
+                    writeStub()
+                }
+            } catch (e: Exception) {
+                mainHandler.post { Toast.makeText(this, "Capture failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            } finally {
+                cleanup()
+            }
+        }, mainHandler)
     }
 
     private fun addDot() {
@@ -106,7 +213,6 @@ class OverlayService : Service() {
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 300 }
 
         val slop = ViewConfiguration.get(this).scaledTouchSlop
-        val h = Handler(Looper.getMainLooper())
         var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
         var moved = false; var longFired = false
         val longRun = Runnable { longFired = true; showMenu(lp) }
@@ -116,31 +222,30 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_DOWN -> {
                     downX = e.rawX; downY = e.rawY; startX = lp.x; startY = lp.y
                     moved = false; longFired = false
-                    h.postDelayed(longRun, 450); true
+                    mainHandler.postDelayed(longRun, 450); true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - downX; val dy = e.rawY - downY
-                    if (!moved && (abs(dx) > slop || abs(dy) > slop)) { moved = true; h.removeCallbacks(longRun) }
+                    if (!moved && (abs(dx) > slop || abs(dy) > slop)) { moved = true; mainHandler.removeCallbacks(longRun) }
                     if (moved) { lp.x = startX + dx.toInt(); lp.y = startY + dy.toInt(); wm.updateViewLayout(v, lp) }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    h.removeCallbacks(longRun)
-                    if (!moved && !longFired) capture()
+                    mainHandler.removeCallbacks(longRun)
+                    if (!moved && !longFired) requestCapture()
                     true
                 }
-                MotionEvent.ACTION_CANCEL -> { h.removeCallbacks(longRun); true }
+                MotionEvent.ACTION_CANCEL -> { mainHandler.removeCallbacks(longRun); true }
                 else -> false
             }
         }
 
         wm.addView(v, lp)
-        dot = v; dotLp = lp
+        dot = v
     }
 
     private fun showMenu(anchor: WindowManager.LayoutParams) {
         dismissMenu()
-
         val s = View(this).apply { setOnTouchListener { _, _ -> dismissMenu(); true } }
         val slp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -194,12 +299,13 @@ class OverlayService : Service() {
         super.onDestroy()
         instance = null
         dismissMenu()
+        runCatching { mediaProjection?.stop() }
+        mediaProjection = null
         dot?.let { runCatching { wm.removeView(it) } }
         canvasView?.let { runCatching { wm.removeView(it) } }
     }
 }
 
-/** Round floating button with a clean, generic sparkle mark (no trademarked logo). */
 class DotView(context: Context) : View(context) {
     private val disc = Paint().apply { isAntiAlias = true; color = Color.parseColor("#141414"); style = Paint.Style.FILL }
     private val ring = Paint().apply { isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 4f }
