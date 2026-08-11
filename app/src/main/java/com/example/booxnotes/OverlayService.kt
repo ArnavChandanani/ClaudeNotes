@@ -20,17 +20,21 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.TextView
+import kotlin.math.abs
 
 class OverlayService : Service() {
 
     companion object { var instance: OverlayService? = null }
 
     private lateinit var wm: WindowManager
-    private var panel: LinearLayout? = null
+    private var dot: DotView? = null
+    private var dotLp: WindowManager.LayoutParams? = null
+    private var menu: View? = null
+    private var scrim: View? = null
     private var canvasView: OverlayCanvas? = null
     private var typeface: Typeface = Typeface.SANS_SERIF
     private var placed = 0
@@ -44,7 +48,7 @@ class OverlayService : Service() {
         typeface = runCatching { Typeface.createFromAsset(assets, "handwriting.ttf") }.getOrDefault(Typeface.SANS_SERIF)
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         addCanvasOverlay()
-        addPanel()
+        addDot()
     }
 
     private fun startForegroundNotice() {
@@ -54,7 +58,7 @@ class OverlayService : Service() {
         )
         val n = Notification.Builder(this, id)
             .setContentTitle("Claude Overlay running")
-            .setContentText("Use the panel to write / capture")
+            .setContentText("Tap the dot to capture; long-press for tools")
             .setSmallIcon(android.R.drawable.ic_menu_edit)
             .build()
         startForeground(1, n)
@@ -87,82 +91,100 @@ class OverlayService : Service() {
         return x to y
     }
 
-    /** Tool-agnostic tap: fires on ACTION_UP for stylus AND finger. */
-    private fun Button.onAnyTap(action: () -> Unit) {
-        setOnTouchListener { v, e ->
-            when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { v.isPressed = true; true }
-                MotionEvent.ACTION_UP -> {
-                    v.isPressed = false
-                    if (e.x >= 0 && e.y >= 0 && e.x <= v.width && e.y <= v.height) action()
-                    true
-                }
-                MotionEvent.ACTION_CANCEL -> { v.isPressed = false; true }
-                else -> true
-            }
-        }
+    private fun capture() {
+        startActivity(Intent(this, CaptureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    private fun addPanel() {
-        val p = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#222222"))
-            setPadding(8, 8, 8, 8)
-        }
-        val handle = TextView(this).apply {
-            text = "drag"
-            setTextColor(Color.WHITE)
-            textSize = 12f
-            gravity = Gravity.CENTER
-            setPadding(0, 6, 0, 10)
-        }
-        p.addView(handle)
-
-        fun mkBtn(label: String, action: () -> Unit): Button =
-            Button(this).apply { text = label; onAnyTap(action) }
-
-        p.addView(mkBtn("write") {
-            val (x, y) = nextPos(); canvasView?.addText("Nicely written!", x, y)
-        })
-        p.addView(mkBtn("tick") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.TICK, x, y) })
-        p.addView(mkBtn("cross") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.CROSS, x, y) })
-        p.addView(mkBtn("capture") {
-            startActivity(Intent(this, CaptureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        })
-        p.addView(mkBtn("clear") { canvasView?.clearAll(); placed = 0 })
-
+    private fun addDot() {
+        val v = DotView(this)
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = 24; y = 180 }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 300 }
 
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        val h = Handler(Looper.getMainLooper())
         var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
-        handle.setOnTouchListener { _, e ->
+        var moved = false; var longFired = false
+        val longRun = Runnable { longFired = true; showMenu(lp) }
+
+        v.setOnTouchListener { _, e ->
             when (e.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downX = e.rawX; downY = e.rawY; startX = lp.x; startY = lp.y; true }
-                MotionEvent.ACTION_MOVE -> {
-                    lp.x = startX + (e.rawX - downX).toInt()
-                    lp.y = startY + (e.rawY - downY).toInt()
-                    wm.updateViewLayout(p, lp); true
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY; startX = lp.x; startY = lp.y
+                    moved = false; longFired = false
+                    h.postDelayed(longRun, 450); true
                 }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX; val dy = e.rawY - downY
+                    if (!moved && (abs(dx) > slop || abs(dy) > slop)) { moved = true; h.removeCallbacks(longRun) }
+                    if (moved) { lp.x = startX + dx.toInt(); lp.y = startY + dy.toInt(); wm.updateViewLayout(v, lp) }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    h.removeCallbacks(longRun)
+                    if (!moved && !longFired) capture()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> { h.removeCallbacks(longRun); true }
                 else -> false
             }
         }
-        wm.addView(p, lp)
-        panel = p
+
+        wm.addView(v, lp)
+        dot = v; dotLp = lp
     }
 
-    /** Hide our overlays so screen capture sees only the app underneath. */
+    private fun showMenu(anchor: WindowManager.LayoutParams) {
+        dismissMenu()
+
+        val s = View(this).apply { setOnTouchListener { _, _ -> dismissMenu(); true } }
+        val slp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        )
+        wm.addView(s, slp); scrim = s
+
+        val m = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#222222"))
+            setPadding(8, 8, 8, 8)
+        }
+        fun item(label: String, act: () -> Unit) {
+            m.addView(Button(this).apply { text = label; setOnClickListener { act(); dismissMenu() } })
+        }
+        item("write") { val (x, y) = nextPos(); canvasView?.addText("Nicely written!", x, y) }
+        item("tick") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.TICK, x, y) }
+        item("cross") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.CROSS, x, y) }
+
+        val mlp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 140; y = anchor.y }
+        wm.addView(m, mlp); menu = m
+    }
+
+    private fun dismissMenu() {
+        menu?.let { runCatching { wm.removeView(it) } }; menu = null
+        scrim?.let { runCatching { wm.removeView(it) } }; scrim = null
+    }
+
     fun setOverlayVisible(visible: Boolean) {
-        val v = if (visible) View.VISIBLE else View.INVISIBLE
-        panel?.visibility = v
-        canvasView?.visibility = v
+        val vis = if (visible) View.VISIBLE else View.INVISIBLE
+        dot?.visibility = vis
+        canvasView?.visibility = vis
+        if (!visible) dismissMenu()
     }
 
-    /** Placeholder for the eventual model reply. */
     fun writeStub() {
         val (x, y) = nextPos()
         canvasView?.addText("Claude: (reply goes here)", x, y)
@@ -171,8 +193,36 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         instance = null
-        panel?.let { runCatching { wm.removeView(it) } }
+        dismissMenu()
+        dot?.let { runCatching { wm.removeView(it) } }
         canvasView?.let { runCatching { wm.removeView(it) } }
+    }
+}
+
+/** Round floating button with a clean, generic sparkle mark (no trademarked logo). */
+class DotView(context: Context) : View(context) {
+    private val disc = Paint().apply { isAntiAlias = true; color = Color.parseColor("#141414"); style = Paint.Style.FILL }
+    private val ring = Paint().apply { isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 4f }
+    private val mark = Paint().apply {
+        isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE
+        strokeWidth = 7f; strokeCap = Paint.Cap.ROUND
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val s = (resources.displayMetrics.density * 46).toInt()
+        setMeasuredDimension(s, s)
+    }
+
+    override fun onDraw(c: Canvas) {
+        val cx = width / 2f; val cy = height / 2f
+        val r = minOf(cx, cy) - 4f
+        c.drawCircle(cx, cy, r, disc)
+        c.drawCircle(cx, cy, r, ring)
+        val a = r * 0.5f; val b = r * 0.36f
+        c.drawLine(cx, cy - a, cx, cy + a, mark)
+        c.drawLine(cx - a, cy, cx + a, cy, mark)
+        c.drawLine(cx - b, cy - b, cx + b, cy + b, mark)
+        c.drawLine(cx - b, cy + b, cx + b, cy - b, mark)
     }
 }
 
@@ -183,7 +233,7 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
 
     companion object {
         const val FRAME_MS = 40L
-        const val STEP = 0.045f   // slower = more aesthetic (and less e-ink ghosting)
+        const val STEP = 0.045f
     }
 
     private val items = mutableListOf<Item>()
@@ -199,7 +249,7 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
     }
     private val measure = PathMeasure()
 
-    private fun ease(p: Float): Float = p * p * (3f - 2f * p)  // smoothstep
+    private fun ease(p: Float): Float = p * p * (3f - 2f * p)
 
     fun addText(text: String, x: Float, y: Float) { items.add(Item(Type.TEXT, text, x, y)); start() }
     fun addMark(type: Type, x: Float, y: Float) { items.add(Item(type, "", x, y)); start() }
