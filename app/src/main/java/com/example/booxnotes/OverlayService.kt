@@ -30,7 +30,9 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import java.io.File
 import java.io.FileOutputStream
@@ -50,6 +52,7 @@ class OverlayService : Service() {
     private var dot: DotView? = null
     private var menu: View? = null
     private var scrim: View? = null
+    private var preview: View? = null
     private var canvasView: OverlayCanvas? = null
     private var typeface: Typeface = Typeface.SANS_SERIF
     private var placed = 0
@@ -121,13 +124,9 @@ class OverlayService : Service() {
     }
 
     private fun nextPos(): Pair<Float, Float> {
-        val x = 120f
-        val y = 320f + (placed % 6) * 150f
-        placed++
-        return x to y
+        val x = 120f; val y = 320f + (placed % 6) * 150f; placed++; return x to y
     }
 
-    /** Reuse the live projection if we have one; otherwise ask permission once. */
     private fun requestCapture() {
         if (mediaProjection != null) doCapture()
         else startActivity(Intent(this, CaptureActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -162,7 +161,6 @@ class OverlayService : Service() {
                 reader.surface, null, null
             )
         } catch (e: Exception) {
-            // projection likely invalidated; drop it and re-request next time
             mediaProjection = null
             cleanup()
             mainHandler.post { Toast.makeText(this, "Capture session lost — tap again", Toast.LENGTH_SHORT).show() }
@@ -190,10 +188,7 @@ class OverlayService : Service() {
                 val file = File(dir, "capture_$stamp.png")
                 FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
 
-                mainHandler.post {
-                    Toast.makeText(this, "Captured -> ${file.name}", Toast.LENGTH_SHORT).show()
-                    writeStub()
-                }
+                mainHandler.post { showPreview(bmp) }
             } catch (e: Exception) {
                 mainHandler.post { Toast.makeText(this, "Capture failed: ${e.message}", Toast.LENGTH_LONG).show() }
             } finally {
@@ -202,14 +197,42 @@ class OverlayService : Service() {
         }, mainHandler)
     }
 
+    private fun showPreview(bmp: Bitmap) {
+        dismissPreview()
+        val m = resources.displayMetrics
+        val maxW = (m.widthPixels * 0.7f).toInt()
+        val scale = maxW.toFloat() / bmp.width
+        val thumb = Bitmap.createScaledBitmap(bmp, maxW, (bmp.height * scale).toInt(), true)
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#EE000000"))
+            setPadding(16, 16, 16, 16)
+        }
+        container.addView(TextView(this).apply {
+            text = "Captured — is this your notes?"
+            setTextColor(Color.WHITE); textSize = 16f; setPadding(0, 0, 0, 12)
+        })
+        container.addView(ImageView(this).apply { setImageBitmap(thumb) })
+        container.addView(Button(this).apply { text = "close"; setOnClickListener { dismissPreview() } })
+
+        val lp = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.CENTER }
+        wm.addView(container, lp)
+        preview = container
+    }
+
+    private fun dismissPreview() {
+        preview?.let { runCatching { wm.removeView(it) } }; preview = null
+    }
+
     private fun addDot() {
         val v = DotView(this)
         val lp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 300 }
 
         val slop = ViewConfiguration.get(this).scaledTouchSlop
@@ -239,7 +262,6 @@ class OverlayService : Service() {
                 else -> false
             }
         }
-
         wm.addView(v, lp)
         dot = v
     }
@@ -248,18 +270,14 @@ class OverlayService : Service() {
         dismissMenu()
         val s = View(this).apply { setOnTouchListener { _, _ -> dismissMenu(); true } }
         val slp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         )
         wm.addView(s, slp); scrim = s
 
         val m = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#222222"))
-            setPadding(8, 8, 8, 8)
+            setBackgroundColor(Color.parseColor("#222222")); setPadding(8, 8, 8, 8)
         }
         fun item(label: String, act: () -> Unit) {
             m.addView(Button(this).apply { text = label; setOnClickListener { act(); dismissMenu() } })
@@ -267,13 +285,11 @@ class OverlayService : Service() {
         item("write") { val (x, y) = nextPos(); canvasView?.addText("Nicely written!", x, y) }
         item("tick") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.TICK, x, y) }
         item("cross") { val (x, y) = nextPos(); canvasView?.addMark(OverlayCanvas.Type.CROSS, x, y) }
+        item("clear") { canvasView?.clearAll(); placed = 0 }
 
         val mlp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
+            WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 140; y = anchor.y }
         wm.addView(m, mlp); menu = m
     }
@@ -287,18 +303,13 @@ class OverlayService : Service() {
         val vis = if (visible) View.VISIBLE else View.INVISIBLE
         dot?.visibility = vis
         canvasView?.visibility = vis
-        if (!visible) dismissMenu()
-    }
-
-    fun writeStub() {
-        val (x, y) = nextPos()
-        canvasView?.addText("Claude: (reply goes here)", x, y)
+        if (!visible) { dismissMenu(); dismissPreview() }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         instance = null
-        dismissMenu()
+        dismissMenu(); dismissPreview()
         runCatching { mediaProjection?.stop() }
         mediaProjection = null
         dot?.let { runCatching { wm.removeView(it) } }
@@ -310,59 +321,51 @@ class DotView(context: Context) : View(context) {
     private val disc = Paint().apply { isAntiAlias = true; color = Color.parseColor("#141414"); style = Paint.Style.FILL }
     private val ring = Paint().apply { isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 4f }
     private val mark = Paint().apply {
-        isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE
-        strokeWidth = 7f; strokeCap = Paint.Cap.ROUND
+        isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 7f; strokeCap = Paint.Cap.ROUND
     }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val s = (resources.displayMetrics.density * 46).toInt()
-        setMeasuredDimension(s, s)
+    override fun onMeasure(w: Int, h: Int) {
+        val s = (resources.displayMetrics.density * 46).toInt(); setMeasuredDimension(s, s)
     }
-
     override fun onDraw(c: Canvas) {
-        val cx = width / 2f; val cy = height / 2f
-        val r = minOf(cx, cy) - 4f
-        c.drawCircle(cx, cy, r, disc)
-        c.drawCircle(cx, cy, r, ring)
+        val cx = width / 2f; val cy = height / 2f; val r = minOf(cx, cy) - 4f
+        c.drawCircle(cx, cy, r, disc); c.drawCircle(cx, cy, r, ring)
         val a = r * 0.5f; val b = r * 0.36f
-        c.drawLine(cx, cy - a, cx, cy + a, mark)
-        c.drawLine(cx - a, cy, cx + a, cy, mark)
-        c.drawLine(cx - b, cy - b, cx + b, cy + b, mark)
-        c.drawLine(cx - b, cy + b, cx + b, cy - b, mark)
+        c.drawLine(cx, cy - a, cx, cy + a, mark); c.drawLine(cx - a, cy, cx + a, cy, mark)
+        c.drawLine(cx - b, cy - b, cx + b, cy + b, mark); c.drawLine(cx - b, cy + b, cx + b, cy - b, mark)
     }
 }
 
 class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
-
     enum class Type { TEXT, TICK, CROSS }
     private class Item(val type: Type, val text: String, val x: Float, val y: Float) { var progress = 0f }
-
-    companion object {
-        const val FRAME_MS = 40L
-        const val STEP = 0.045f
-    }
+    companion object { const val FRAME_MS = 40L; const val STEP = 0.045f }
 
     private val items = mutableListOf<Item>()
     private val handler = Handler(Looper.getMainLooper())
     private var animating = false
 
+    // Thicker + darker cursive: pure black, faux-bold, and a thin stroke pass over
+    // the fill to add weight (reads much better on e-ink than the default thin glyphs).
     private val textPaint = Paint().apply {
-        isAntiAlias = true; color = Color.BLACK; textSize = 60f; this.typeface = typeface
+        isAntiAlias = true
+        color = Color.BLACK
+        textSize = 62f
+        this.typeface = typeface
+        isFakeBoldText = true
+        style = Paint.Style.FILL_AND_STROKE
+        strokeWidth = 1.6f
     }
     private val markPaint = Paint().apply {
         isAntiAlias = true; color = Color.BLACK; style = Paint.Style.STROKE
         strokeWidth = 9f; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
     }
     private val measure = PathMeasure()
-
     private fun ease(p: Float): Float = p * p * (3f - 2f * p)
 
     fun addText(text: String, x: Float, y: Float) { items.add(Item(Type.TEXT, text, x, y)); start() }
     fun addMark(type: Type, x: Float, y: Float) { items.add(Item(type, "", x, y)); start() }
     fun clearAll() { items.clear(); invalidate() }
-
     private fun start() { if (!animating) { animating = true; handler.post(loop) } else invalidate() }
-
     private val loop = object : Runnable {
         override fun run() {
             var any = false
@@ -371,37 +374,23 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
             if (any) handler.postDelayed(this, FRAME_MS) else animating = false
         }
     }
-
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         for (it in items) when (it.type) {
-            Type.TEXT -> drawText(canvas, it)
-            Type.TICK -> drawTick(canvas, it)
-            Type.CROSS -> drawCross(canvas, it)
+            Type.TEXT -> drawText(canvas, it); Type.TICK -> drawTick(canvas, it); Type.CROSS -> drawCross(canvas, it)
         }
     }
-
     private fun drawText(canvas: Canvas, it: Item) {
-        val e = ease(it.progress)
-        val full = textPaint.measureText(it.text)
+        val e = ease(it.progress); val full = textPaint.measureText(it.text)
         textPaint.alpha = (60 + 195 * e).toInt().coerceIn(0, 255)
-        canvas.save()
-        canvas.clipRect(it.x, it.y - 72f, it.x + full * e, it.y + 26f)
-        canvas.drawText(it.text, it.x, it.y, textPaint)
-        canvas.restore()
-        textPaint.alpha = 255
+        canvas.save(); canvas.clipRect(it.x, it.y - 74f, it.x + full * e, it.y + 28f)
+        canvas.drawText(it.text, it.x, it.y, textPaint); canvas.restore(); textPaint.alpha = 255
     }
-
     private fun drawTick(canvas: Canvas, it: Item) {
         val s = 52f
-        val p = Path().apply {
-            moveTo(it.x, it.y)
-            lineTo(it.x + s * 0.35f, it.y + s * 0.42f)
-            lineTo(it.x + s, it.y - s * 0.5f)
-        }
+        val p = Path().apply { moveTo(it.x, it.y); lineTo(it.x + s * 0.35f, it.y + s * 0.42f); lineTo(it.x + s, it.y - s * 0.5f) }
         drawPartial(canvas, p, ease(it.progress))
     }
-
     private fun drawCross(canvas: Canvas, it: Item) {
         val s = 46f
         val a = Path().apply { moveTo(it.x, it.y - s / 2); lineTo(it.x + s, it.y + s / 2) }
@@ -410,12 +399,10 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
         drawPartial(canvas, a, (e * 2f).coerceAtMost(1f))
         if (e > 0.5f) drawPartial(canvas, b, ((e - 0.5f) * 2f).coerceAtMost(1f))
     }
-
     private fun drawPartial(canvas: Canvas, path: Path, progress: Float) {
         if (progress <= 0f) return
         measure.setPath(path, false)
-        val seg = Path()
-        measure.getSegment(0f, measure.length * progress, seg, true)
+        val seg = Path(); measure.getSegment(0f, measure.length * progress, seg, true)
         canvas.drawPath(seg, markPaint)
     }
 }
