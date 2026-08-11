@@ -125,6 +125,7 @@ class OverlayService : Service() {
 
     private fun addCanvasOverlay() {
         val view = OverlayCanvas(this, typeface)
+        // Canvas stays fully pass-through so the pen reaches Boox Notes for writing.
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -253,7 +254,8 @@ class OverlayService : Service() {
         container.addView(Button(this).apply { text = "close"; setOnClickListener { dismissPreview() } })
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.CENTER }
         wm.addView(container, lp)
         preview = container
@@ -265,15 +267,21 @@ class OverlayService : Service() {
 
     private fun addDot() {
         val v = DotView(this)
+        // KEY FIX: the dot window is focusable + touch-modal so the stylus can't route
+        // past it into Boox Notes. FLAG_NOT_TOUCH_MODAL is REMOVED (its absence makes
+        // this window grab touches within its bounds first). No NOT_FOCUSABLE here.
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 300 }
 
         val slop = ViewConfiguration.get(this).scaledTouchSlop
         var downX = 0f; var downY = 0f; var startX = 0; var startY = 0
         var moved = false; var longFired = false
-        var pendingSingle = false           // a first tap is waiting to see if a second follows
+        var pendingSingle = false
         val longRun = Runnable { longFired = true; showMenu(lp) }
         val singleRun = Runnable { pendingSingle = false; requestCapture() }
 
@@ -294,12 +302,10 @@ class OverlayService : Service() {
                     mainHandler.removeCallbacks(longRun)
                     if (!moved && !longFired) {
                         if (pendingSingle) {
-                            // second tap within the window -> double-tap = clear
                             pendingSingle = false
                             mainHandler.removeCallbacks(singleRun)
                             canvasView?.clearAll()
                         } else {
-                            // first tap: wait to see if a second one arrives
                             pendingSingle = true
                             mainHandler.postDelayed(singleRun, DOUBLE_TAP_MS)
                         }
@@ -333,7 +339,9 @@ class OverlayService : Service() {
         item("clear") { canvasView?.clearAll() }
         val mlp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
+            overlayType(),
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 140; y = anchor.y }
         wm.addView(m, mlp); menu = m
     }
@@ -368,7 +376,8 @@ class DotView(context: Context) : View(context) {
         isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 7f; strokeCap = Paint.Cap.ROUND
     }
     override fun onMeasure(w: Int, h: Int) {
-        val s = (resources.displayMetrics.density * 46).toInt(); setMeasuredDimension(s, s)
+        // Bigger target so the pen has a solid area to land on.
+        val s = (resources.displayMetrics.density * 60).toInt(); setMeasuredDimension(s, s)
     }
     override fun onDraw(c: Canvas) {
         val cx = width / 2f; val cy = height / 2f; val r = minOf(cx, cy) - 4f
