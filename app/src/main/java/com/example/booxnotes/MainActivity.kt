@@ -1,206 +1,86 @@
 package com.example.booxnotes
 
-import android.content.Context
-import android.graphics.Bitmap
-import android.graphics.Canvas
+import android.content.Intent
 import android.graphics.Color
-import android.graphics.Paint
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.Gravity
-import android.view.MotionEvent
-import android.view.View
-import android.view.ViewGroup
 import android.widget.Button
-import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.io.FileOutputStream
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import kotlin.math.hypot
 
-/**
- * v0.6 -- programmatic EpdController removed (it regressed refresh on this Qualcomm
- * device). Clean rendering only; speed comes from the manual E-Ink Center A2 mode.
- */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var drawView: DrawView
+    private lateinit var status: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = FrameLayout(this)
-        drawView = DrawView(this)
-        root.addView(
-            drawView,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        root.addView(buildToolbar())
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(70, 130, 70, 70)
+        }
+
+        root.addView(TextView(this).apply {
+            text = "CLAUDE OVERLAY  v0.9"
+            textSize = 24f
+            setTextColor(Color.BLACK)
+        })
+
+        status = TextView(this).apply {
+            textSize = 16f
+            setPadding(0, 30, 0, 40)
+        }
+        root.addView(status)
+
+        root.addView(Button(this).apply {
+            text = "1. Grant overlay permission"
+            setOnClickListener {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            }
+        })
+
+        root.addView(Button(this).apply {
+            text = "2. Start overlay"
+            setOnClickListener {
+                if (Settings.canDrawOverlays(this@MainActivity)) {
+                    val i = Intent(this@MainActivity, OverlayService::class.java)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        startForegroundService(i) else startService(i)
+                    Toast.makeText(this@MainActivity, "Overlay started — open Boox Notes", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@MainActivity, "Do step 1 first", Toast.LENGTH_LONG).show()
+                }
+            }
+        })
+
+        root.addView(Button(this).apply {
+            text = "3. Stop overlay"
+            setOnClickListener {
+                stopService(Intent(this@MainActivity, OverlayService::class.java))
+                Toast.makeText(this@MainActivity, "Overlay stopped", Toast.LENGTH_SHORT).show()
+            }
+        })
+
         setContentView(root)
     }
 
-    private fun buildToolbar(): LinearLayout {
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.LTGRAY)
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                DrawView.TOOLBAR_HEIGHT_PX
-            )
-        }
-        bar.addView(Button(this).apply { text = "Save"; setOnClickListener { savePage() } })
-        bar.addView(Button(this).apply { text = "Clear"; setOnClickListener { drawView.clearPage() } })
-        return bar
-    }
-
-    private fun savePage() {
-        val bmp = drawView.snapshot() ?: run { toast("Nothing to save yet"); return }
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val dir = getExternalFilesDir(null) ?: filesDir
-        try {
-            FileOutputStream(File(dir, "note_$stamp.png")).use {
-                bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
-            }
-            File(dir, "note_$stamp.json").writeText(drawView.toJson().toString(2))
-            toast("Saved: ${drawView.strokeCount()} strokes, ${drawView.pointCount()} points\n$dir")
-        } catch (e: Exception) {
-            toast("Save failed: ${e.message}")
-        }
-    }
-
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-}
-
-class DrawView(context: Context) : View(context) {
-
-    companion object {
-        const val TOOLBAR_HEIGHT_PX = 130
-        const val MIN_DIST = 2.5f
-        const val STROKE_WIDTH = 3f
-    }
-
-    private data class Pt(val x: Float, val y: Float, val p: Float, val t: Long)
-    private data class Stroke(val tool: String, val color: String, val width: Float, val points: List<Pt>)
-
-    private val strokes = mutableListOf<Stroke>()
-    private var pageBitmap: Bitmap? = null
-    private var pageCanvas: Canvas? = null
-
-    private val paint = Paint().apply {
-        isAntiAlias = false
-        isDither = false
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeWidth = STROKE_WIDTH
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
-    }
-
-    private var currentPts = mutableListOf<Pt>()
-    private var lastX = 0f
-    private var lastY = 0f
-    private val pad = STROKE_WIDTH * 2f
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        if (w <= 0 || h <= 0) return
-        if (pageBitmap?.width == w && pageBitmap?.height == h) return
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        Canvas(bmp).drawColor(Color.WHITE)
-        pageBitmap = bmp
-        pageCanvas = Canvas(bmp)
-        invalidate()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        pageBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
-    }
-
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return false
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                val x = event.x; val y = event.y
-                if (y < TOOLBAR_HEIGHT_PX) return false
-                currentPts = mutableListOf(Pt(x, y, event.pressure, event.eventTime))
-                lastX = x; lastY = y
-                pageCanvas?.drawPoint(x, y, paint)
-                invalidate((x - pad).toInt(), (y - pad).toInt(), (x + pad).toInt(), (y + pad).toInt())
-                return true
-            }
-            MotionEvent.ACTION_MOVE -> {
-                val canvas = pageCanvas ?: return true
-                for (h in 0 until event.historySize) {
-                    addSegment(canvas, event.getHistoricalX(h), event.getHistoricalY(h),
-                        event.getHistoricalPressure(h), event.getHistoricalEventTime(h))
-                }
-                addSegment(canvas, event.x, event.y, event.pressure, event.eventTime)
-                return true
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (currentPts.isNotEmpty()) {
-                    strokes.add(Stroke("pen", "#000000", STROKE_WIDTH, currentPts.toList()))
-                }
-                currentPts = mutableListOf()
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun addSegment(canvas: Canvas, x: Float, y: Float, pressure: Float, time: Long) {
-        if (hypot(x - lastX, y - lastY) < MIN_DIST) return
-        canvas.drawLine(lastX, lastY, x, y, paint)
-        currentPts.add(Pt(x, y, pressure, time))
-        val l = (minOf(lastX, x) - pad).toInt()
-        val t = (minOf(lastY, y) - pad).toInt()
-        val r = (maxOf(lastX, x) + pad).toInt()
-        val b = (maxOf(lastY, y) + pad).toInt()
-        invalidate(l, t, r, b)
-        lastX = x; lastY = y
-    }
-
-    fun clearPage() {
-        strokes.clear()
-        pageCanvas?.drawColor(Color.WHITE)
-        currentPts = mutableListOf()
-        invalidate()
-    }
-
-    fun snapshot(): Bitmap? = pageBitmap
-    fun strokeCount(): Int = strokes.size
-    fun pointCount(): Int = strokes.sumOf { it.points.size }
-
-    fun toJson(): JSONObject {
-        val strokeArr = JSONArray()
-        for (s in strokes) {
-            val ptArr = JSONArray()
-            for (p in s.points) {
-                ptArr.put(JSONObject().apply {
-                    put("x", p.x.toDouble()); put("y", p.y.toDouble())
-                    put("p", p.p.toDouble()); put("t", p.t)
-                })
-            }
-            strokeArr.put(JSONObject().apply {
-                put("tool", s.tool); put("color", s.color)
-                put("width", s.width.toDouble()); put("points", ptArr)
-            })
-        }
-        val page = JSONObject().apply {
-            put("width", pageBitmap?.width ?: 0)
-            put("height", pageBitmap?.height ?: 0)
-            put("strokes", strokeArr)
-        }
-        return JSONObject().apply { put("schemaVersion", 1); put("page", page) }
+    override fun onResume() {
+        super.onResume()
+        val granted = Settings.canDrawOverlays(this)
+        status.text = if (granted)
+            "Overlay permission: GRANTED ✓\nTap 'Start overlay', then open Boox Notes."
+        else
+            "Overlay permission: NOT granted ✗\nTap step 1 and enable it for Claude Overlay."
+        status.setTextColor(if (granted) Color.rgb(0, 130, 0) else Color.rgb(180, 0, 0))
     }
 }

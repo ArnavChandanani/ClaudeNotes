@@ -25,11 +25,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 
-/**
- * v0.8 -- overlay that WRITES over other apps with a cursive font, animating each
- * item on (left-to-right reveal for text, drawn-in strokes for tick/cross).
- * Canvas overlay is touch-through so the pen keeps writing underneath.
- */
 class OverlayService : Service() {
 
     private lateinit var wm: WindowManager
@@ -65,7 +60,7 @@ class OverlayService : Service() {
             NotificationChannel(id, "Overlay", NotificationManager.IMPORTANCE_MIN)
         )
         val n: Notification = Notification.Builder(this, id)
-            .setContentTitle("Overlay Notes running")
+            .setContentTitle("Claude Overlay running")
             .setContentText("Use the panel to write over your notes")
             .setSmallIcon(android.R.drawable.ic_menu_edit)
             .build()
