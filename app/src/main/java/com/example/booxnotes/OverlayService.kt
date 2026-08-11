@@ -125,7 +125,6 @@ class OverlayService : Service() {
 
     private fun addCanvasOverlay() {
         val view = OverlayCanvas(this, typeface)
-        // Canvas stays fully pass-through so the pen reaches Boox Notes for writing.
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -267,14 +266,16 @@ class OverlayService : Service() {
 
     private fun addDot() {
         val v = DotView(this)
-        // KEY FIX: the dot window is focusable + touch-modal so the stylus can't route
-        // past it into Boox Notes. FLAG_NOT_TOUCH_MODAL is REMOVED (its absence makes
-        // this window grab touches within its bounds first). No NOT_FOCUSABLE here.
+        // Correct flag set: NOT_FOCUSABLE keeps the keyboard/focus out of it, and
+        // NOT_TOUCH_MODAL means this window ONLY receives touches that land within
+        // its own bounds — everything outside falls through to Boox Notes. This is the
+        // combo that makes the dot tappable WITHOUT hijacking the whole screen.
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply { gravity = Gravity.TOP or Gravity.START; x = 40; y = 300 }
 
@@ -340,9 +341,9 @@ class OverlayService : Service() {
         val mlp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             overlayType(),
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 140; y = anchor.y }
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = anchor.x + 160; y = anchor.y }
         wm.addView(m, mlp); menu = m
     }
 
@@ -376,7 +377,6 @@ class DotView(context: Context) : View(context) {
         isAntiAlias = true; color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 7f; strokeCap = Paint.Cap.ROUND
     }
     override fun onMeasure(w: Int, h: Int) {
-        // Bigger target so the pen has a solid area to land on.
         val s = (resources.displayMetrics.density * 60).toInt(); setMeasuredDimension(s, s)
     }
     override fun onDraw(c: Canvas) {
