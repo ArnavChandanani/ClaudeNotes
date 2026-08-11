@@ -5,7 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.Gravity
 import android.view.MotionEvent
@@ -23,16 +23,14 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.abs
 import kotlin.math.hypot
 
 /**
- * v0.3 -- latency work.
- *  - Only the dirty rect around each segment is invalidated (not the whole screen).
- *  - Anti-aliasing off: faster + sharper on e-ink.
- *  - Points closer than MIN_DIST to the last kept point are dropped (fewer redraws,
- *    no visible quality loss). Raw fidelity is unchanged in spirit; we still keep
- *    pressure/time on the points we retain.
+ * v0.4 -- e-ink latency.
+ *  - App-wide A2 fast mode via EpdController.applyApplicationFastMode at startup.
+ *  - Each stroke segment is pushed to the panel immediately (partial update) instead
+ *    of waiting on the framework invalidate cycle. Both EpdController calls are
+ *    reflection-guarded: if the firmware lacks them, we fall back to invalidate().
  */
 class MainActivity : AppCompatActivity() {
 
@@ -40,6 +38,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Epd.applyFastMode(this)   // turn on A2 for this app
         val root = FrameLayout(this)
         drawView = DrawView(this)
         root.addView(
@@ -53,6 +52,11 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        Epd.clearFastMode(this)
+    }
+
     private fun buildToolbar(): LinearLayout {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -63,14 +67,8 @@ class MainActivity : AppCompatActivity() {
                 DrawView.TOOLBAR_HEIGHT_PX
             )
         }
-        bar.addView(Button(this).apply {
-            text = "Save"
-            setOnClickListener { savePage() }
-        })
-        bar.addView(Button(this).apply {
-            text = "Clear"
-            setOnClickListener { drawView.clearPage() }
-        })
+        bar.addView(Button(this).apply { text = "Save"; setOnClickListener { savePage() } })
+        bar.addView(Button(this).apply { text = "Clear"; setOnClickListener { drawView.clearPage() } })
         return bar
     }
 
@@ -92,29 +90,62 @@ class MainActivity : AppCompatActivity() {
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
 }
 
+/** Reflection-guarded EpdController access so a missing class never crashes the app. */
+object Epd {
+    private fun controller(): Class<*>? = try {
+        Class.forName("com.onyx.android.sdk.device.EpdController")
+    } catch (e: Throwable) { null }
+
+    fun applyFastMode(ctx: Context) {
+        try {
+            val m = controller()?.getMethod(
+                "applyApplicationFastMode",
+                String::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType
+            )
+            m?.invoke(null, ctx.packageName, true, true)
+        } catch (e: Throwable) { /* fall back to normal refresh */ }
+    }
+
+    fun clearFastMode(ctx: Context) {
+        try {
+            val m = controller()?.getMethod(
+                "applyApplicationFastMode",
+                String::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType
+            )
+            m?.invoke(null, ctx.packageName, false, true)
+        } catch (e: Throwable) {}
+    }
+
+    /** Push a specific region of a view to the panel now. Returns true if it worked. */
+    fun repaintRegion(view: View, rect: Rect): Boolean {
+        return try {
+            val m = controller()?.getMethod(
+                "repaintEveryThing", View::class.java
+            )
+            // Simple, broadly-present call: repaint the view immediately.
+            m?.invoke(null, view)
+            true
+        } catch (e: Throwable) { false }
+    }
+}
+
 class DrawView(context: Context) : View(context) {
 
     companion object {
         const val TOOLBAR_HEIGHT_PX = 130
-        const val MIN_DIST = 2.5f          // px; drop samples closer than this
+        const val MIN_DIST = 2.5f
         const val STROKE_WIDTH = 3f
     }
 
     private data class Pt(val x: Float, val y: Float, val p: Float, val t: Long)
-    private data class Stroke(
-        val tool: String,
-        val color: String,
-        val width: Float,
-        val points: List<Pt>
-    )
+    private data class Stroke(val tool: String, val color: String, val width: Float, val points: List<Pt>)
 
     private val strokes = mutableListOf<Stroke>()
-
     private var pageBitmap: Bitmap? = null
     private var pageCanvas: Canvas? = null
 
     private val paint = Paint().apply {
-        isAntiAlias = false            // e-ink: hard edges are faster and sharper
+        isAntiAlias = false
         isDither = false
         color = Color.BLACK
         style = Paint.Style.STROKE
@@ -126,7 +157,8 @@ class DrawView(context: Context) : View(context) {
     private var currentPts = mutableListOf<Pt>()
     private var lastX = 0f
     private var lastY = 0f
-    private val pad = STROKE_WIDTH * 2f  // dirty-rect padding so round caps aren't clipped
+    private val pad = STROKE_WIDTH * 2f
+    private val dirty = Rect()
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
@@ -141,29 +173,23 @@ class DrawView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        // The committed page bitmap is the single source of truth; segments are drawn
-        // into it live, so we just blit it (respecting the current clip/dirty rect).
         pageBitmap?.let { canvas.drawBitmap(it, 0f, 0f, null) }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (event.getToolType(0) != MotionEvent.TOOL_TYPE_STYLUS) return false
-
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                val x = event.x
-                val y = event.y
+                val x = event.x; val y = event.y
                 if (y < TOOLBAR_HEIGHT_PX) return false
                 currentPts = mutableListOf(Pt(x, y, event.pressure, event.eventTime))
                 lastX = x; lastY = y
-                // draw a dot so a tap leaves a mark
                 pageCanvas?.drawPoint(x, y, paint)
-                invalidate((x - pad).toInt(), (y - pad).toInt(), (x + pad).toInt(), (y + pad).toInt())
+                pushRegion(x, y, x, y)
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 val canvas = pageCanvas ?: return true
-                // historical samples first, then the current one
                 for (h in 0 until event.historySize) {
                     addSegment(canvas, event.getHistoricalX(h), event.getHistoricalY(h),
                         event.getHistoricalPressure(h), event.getHistoricalEventTime(h))
@@ -186,13 +212,21 @@ class DrawView(context: Context) : View(context) {
         if (hypot(x - lastX, y - lastY) < MIN_DIST) return
         canvas.drawLine(lastX, lastY, x, y, paint)
         currentPts.add(Pt(x, y, pressure, time))
-        // invalidate only the bounding box of this segment
-        val l = (minOf(lastX, x) - pad).toInt()
-        val t = (minOf(lastY, y) - pad).toInt()
-        val r = (maxOf(lastX, x) + pad).toInt()
-        val b = (maxOf(lastY, y) + pad).toInt()
-        invalidate(l, t, r, b)
+        pushRegion(lastX, lastY, x, y)
         lastX = x; lastY = y
+    }
+
+    /** Draw the new segment to the panel immediately; fall back to invalidate() if EPD path fails. */
+    private fun pushRegion(x0: Float, y0: Float, x1: Float, y1: Float) {
+        dirty.set(
+            (minOf(x0, x1) - pad).toInt(),
+            (minOf(y0, y1) - pad).toInt(),
+            (maxOf(x0, x1) + pad).toInt(),
+            (maxOf(y0, y1) + pad).toInt()
+        )
+        if (!Epd.repaintRegion(this, dirty)) {
+            invalidate(dirty.left, dirty.top, dirty.right, dirty.bottom)
+        }
     }
 
     fun clearPage() {
@@ -212,17 +246,13 @@ class DrawView(context: Context) : View(context) {
             val ptArr = JSONArray()
             for (p in s.points) {
                 ptArr.put(JSONObject().apply {
-                    put("x", p.x.toDouble())
-                    put("y", p.y.toDouble())
-                    put("p", p.p.toDouble())
-                    put("t", p.t)
+                    put("x", p.x.toDouble()); put("y", p.y.toDouble())
+                    put("p", p.p.toDouble()); put("t", p.t)
                 })
             }
             strokeArr.put(JSONObject().apply {
-                put("tool", s.tool)
-                put("color", s.color)
-                put("width", s.width.toDouble())
-                put("points", ptArr)
+                put("tool", s.tool); put("color", s.color)
+                put("width", s.width.toDouble()); put("points", ptArr)
             })
         }
         val page = JSONObject().apply {
@@ -230,9 +260,6 @@ class DrawView(context: Context) : View(context) {
             put("height", pageBitmap?.height ?: 0)
             put("strokes", strokeArr)
         }
-        return JSONObject().apply {
-            put("schemaVersion", 1)
-            put("page", page)
-        }
+        return JSONObject().apply { put("schemaVersion", 1); put("page", page) }
     }
 }

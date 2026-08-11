@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.booxnotes"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 4
+        versionName = "0.4"
     }
 
     compileOptions {
@@ -37,7 +37,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
 
-    // Onyx Pen SDK. 1.4.11 is the version in Onyx's own docs; newer builds exist in
-    // the repo.boox.com maven listing. If drawing misbehaves, try bumping this.
-    implementation("com.onyx.android.sdk:onyxsdk-pen:1.4.11")
+    // Display-side Onyx SDK only (EpdController). NOT the pen/raw-drawing SDK.
+    implementation("com.onyx.android.sdk:onyxsdk-device:1.2.31")
 }
