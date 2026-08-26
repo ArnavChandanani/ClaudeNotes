@@ -103,12 +103,12 @@ Reply with ONLY this JSON object. No preamble, no markdown fences, no explanatio
 
             val msgs = JSONArray()
             msgs.put(JSONObject().apply { put("role", "user"); put("content", userContent) })
-            // Prefill an opening brace: the model physically cannot start with prose.
-            msgs.put(JSONObject().apply { put("role", "assistant"); put("content", "{") })
+            // No assistant prefill: these models think by default, and the API rejects
+            // prefill when thinking is on. The brace-extraction in the parser covers us.
 
             val body = JSONObject().apply {
                 put("model", model.id)
-                put("max_tokens", 2000)
+                put("max_tokens", 4000)   // headroom — thinking tokens count against this
                 put("messages", msgs)
             }
 
@@ -138,7 +138,7 @@ Reply with ONLY this JSON object. No preamble, no markdown fences, no explanatio
 
             val obj = JSONObject(resp)
             val contentArr = obj.getJSONArray("content")
-            val sb = StringBuilder("{")   // put the prefilled brace back
+            val sb = StringBuilder()      // thinking blocks are skipped; we keep only text
             for (i in 0 until contentArr.length()) {
                 val block = contentArr.getJSONObject(i)
                 if (block.optString("type") == "text") sb.append(block.optString("text"))
