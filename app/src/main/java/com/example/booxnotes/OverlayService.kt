@@ -32,12 +32,8 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import kotlin.math.abs
 
 class OverlayService : Service() {
@@ -49,11 +45,12 @@ class OverlayService : Service() {
         const val DOUBLE_TAP_MS = 250L
 
         const val TEST_JSON = """
-        {"annotations":[
-          {"type":"text","content":"Good working","band":"top"},
-          {"type":"tick","band":"top"},
-          {"type":"cross","band":"middle"},
-          {"type":"text","content":"Recheck this","band":"bottom"}
+        {"mode":"mark","blank_cells":["F2","G4","B10"],
+         "annotations":[
+          {"type":"text","content":"Good working","cell":"E2"},
+          {"type":"tick","cell":"H2"},
+          {"type":"cross","cell":"H5"},
+          {"type":"text","content":"Recheck this step","cell":"C10"}
         ]}
         """
     }
@@ -72,13 +69,17 @@ class OverlayService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var capturing = false
 
+    private fun prefs() = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+    private fun currentModel() = ClaudeClient.Model.from(prefs().getString("model", null))
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         startForegroundNotice()
-        typeface = runCatching { Typeface.createFromAsset(assets, "handwriting.ttf") }.getOrDefault(Typeface.SANS_SERIF)
+        typeface = runCatching { Typeface.createFromAsset(assets, "handwriting.ttf") }
+            .getOrDefault(Typeface.SANS_SERIF)
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         addCanvasOverlay()
         addDot()
@@ -108,7 +109,7 @@ class OverlayService : Service() {
         )
         val n = Notification.Builder(this, id)
             .setContentTitle("Claude Overlay running")
-            .setContentText("Finger-tap: ask Claude · Double-tap: clear · Long-press: tools")
+            .setContentText("Tap: ask Claude · Double-tap: clear · Long-press: model & tools")
             .setSmallIcon(android.R.drawable.ic_menu_edit).build()
         startForeground(1, n)
     }
@@ -131,23 +132,31 @@ class OverlayService : Service() {
         wm.addView(view, lp); canvasView = view
     }
 
-    private data class Ann(val type: String, val content: String, val band: String)
+    private data class Ann(val type: String, val content: String, val cell: String)
 
     fun renderAnnotations(rawJson: String) {
         val cleaned = rawJson.replace("\r", "").replace("```json", "").replace("```", "").trim()
-        val parsed = try {
-            val obj = JSONObject(cleaned.substring(cleaned.indexOf('{'), cleaned.lastIndexOf('}') + 1))
+        val obj = try {
+            JSONObject(cleaned.substring(cleaned.indexOf('{'), cleaned.lastIndexOf('}') + 1))
+        } catch (e: Exception) {
+            mainHandler.post { Toast.makeText(this, "Couldn't read reply as JSON", Toast.LENGTH_LONG).show() }
+            return
+        }
+
+        val mode = obj.optString("mode", "")
+        val parsed = ArrayList<Ann>()
+        try {
             val arr = obj.getJSONArray("annotations")
-            val list = ArrayList<Ann>()
             for (i in 0 until arr.length()) {
                 val a = arr.getJSONObject(i)
                 val type = a.optString("type", "").lowercase()
                 if (type.isEmpty()) continue
-                list.add(Ann(type, a.optString("content", ""), a.optString("band", "middle").lowercase()))
+                // Belt and braces: in answer mode, strip ticks/crosses even if the model slipped.
+                if (mode == "answer" && type != "text") continue
+                parsed.add(Ann(type, a.optString("content", ""), a.optString("cell", "")))
             }
-            list
         } catch (e: Exception) {
-            mainHandler.post { Toast.makeText(this, "Couldn't read reply as JSON", Toast.LENGTH_LONG).show() }
+            mainHandler.post { Toast.makeText(this, "Reply had no annotations array", Toast.LENGTH_LONG).show() }
             return
         }
         if (parsed.isEmpty()) {
@@ -157,24 +166,41 @@ class OverlayService : Service() {
 
         val screenW = resources.displayMetrics.widthPixels.toFloat()
         val screenH = resources.displayMetrics.heightPixels.toFloat()
-        val markX = screenW - 130f
-        val textX = screenW * 0.42f
-        fun bandOrder(b: String) = when (b) { "top" -> 0; "middle" -> 1; else -> 2 }
-        val ordered = parsed.sortedBy { bandOrder(it.band) }
-        val bandTopY = mapOf("top" to screenH * 0.18f, "middle" to screenH * 0.5f, "bottom" to screenH * 0.82f)
-        val counts = HashMap<String, Int>()
+        val cw = screenW / Grid.COLS
+        val ch = screenH / Grid.ROWS
 
+        // Reading order; never stack two annotations in one cell — nudge down instead.
+        val ordered = parsed.sortedBy { a ->
+            val p = Grid.parse(a.cell); if (p == null) 999 else p.second * Grid.COLS + p.first
+        }
+        val used = HashSet<String>()
         var delay = 0L
+
         for (a in ordered) {
-            val n = counts.getOrDefault(a.band, 0)
-            counts[a.band] = n + 1
-            val baseY = bandTopY[a.band] ?: (screenH * 0.5f)
-            val y = baseY + n * 110f
+            var (col, row) = Grid.parse(a.cell) ?: (3 to 5)   // centre-ish fallback
+            var key = Grid.label(col, row)
+            var guard = 0
+            while (key in used && guard < Grid.ROWS) {
+                row = (row + 1).coerceAtMost(Grid.ROWS - 1)
+                key = Grid.label(col, row); guard++
+            }
+            used.add(key)
+
+            val cellLeft = col * cw
+            val cellTop = row * ch
+
             mainHandler.postDelayed({
                 when (a.type) {
-                    "text"  -> canvasView?.addText(a.content, textX, y)
-                    "tick"  -> canvasView?.addMark(OverlayCanvas.Type.TICK, markX, y)
-                    "cross" -> canvasView?.addMark(OverlayCanvas.Type.CROSS, markX, y)
+                    "text" -> {
+                        val needed = canvasView?.measureText(a.content) ?: 0f
+                        var x = cellLeft + cw * 0.08f
+                        if (x + needed > screenW - 16f) x = (screenW - 16f - needed).coerceAtLeast(8f)
+                        canvasView?.addText(a.content, x, cellTop + ch * 0.70f)
+                    }
+                    "tick"  -> canvasView?.addMark(OverlayCanvas.Type.TICK,
+                                    cellLeft + cw * 0.5f - 26f, cellTop + ch * 0.5f)
+                    "cross" -> canvasView?.addMark(OverlayCanvas.Type.CROSS,
+                                    cellLeft + cw * 0.5f - 23f, cellTop + ch * 0.5f)
                 }
             }, delay)
             delay += 500L
@@ -235,14 +261,15 @@ class OverlayService : Service() {
     private fun onCaptured(full: Bitmap) {
         val scale = TARGET_WIDTH.toFloat() / full.width
         val small = Bitmap.createScaledBitmap(full, TARGET_WIDTH, (full.height * scale).toInt(), true)
-        val apiKey = getSharedPreferences("cfg", Context.MODE_PRIVATE).getString("api_key", "") ?: ""
+        val apiKey = prefs().getString("api_key", "") ?: ""
         if (apiKey.isBlank()) {
             mainHandler.post { Toast.makeText(this, "No API key — set it in the app first", Toast.LENGTH_LONG).show() }
             return
         }
-        mainHandler.post { Toast.makeText(this, "Asking Claude…", Toast.LENGTH_SHORT).show() }
+        val model = currentModel()
+        mainHandler.post { Toast.makeText(this, "Asking ${model.label}…", Toast.LENGTH_SHORT).show() }
         netHandler.post {
-            val res = ClaudeClient.annotate(apiKey, small)
+            val res = ClaudeClient.annotate(apiKey, small, model)
             mainHandler.post {
                 if (res.error != null) Toast.makeText(this, "Claude error: ${res.error}", Toast.LENGTH_LONG).show()
                 else if (res.json != null) renderAnnotations(res.json)
@@ -305,6 +332,14 @@ class OverlayService : Service() {
         }
         fun item(label: String, act: () -> Unit) {
             m.addView(Button(this).apply { text = label; setOnClickListener { act(); dismissMenu() } })
+        }
+        // Model picker — filled dot marks the active model, persists across restarts.
+        val cur = currentModel()
+        for (mod in ClaudeClient.Model.entries) {
+            item((if (mod == cur) "● " else "○ ") + mod.label) {
+                prefs().edit().putString("model", mod.name).apply()
+                Toast.makeText(this, "Model: ${mod.label} (${mod.note})", Toast.LENGTH_SHORT).show()
+            }
         }
         item("test JSON") { renderAnnotations(TEST_JSON) }
         item("clear") { canvasView?.clearAll() }
@@ -370,6 +405,7 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
     }
     private val measure = PathMeasure()
     private fun ease(p: Float): Float = p * p * (3f - 2f * p)
+    fun measureText(text: String): Float = textPaint.measureText(text)
     fun addText(text: String, x: Float, y: Float) { items.add(Item(Type.TEXT, text, x, y)); start() }
     fun addMark(type: Type, x: Float, y: Float) { items.add(Item(type, "", x, y)); start() }
     fun clearAll() { items.clear(); invalidate() }
