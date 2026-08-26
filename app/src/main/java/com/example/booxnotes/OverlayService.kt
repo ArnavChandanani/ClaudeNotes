@@ -43,6 +43,7 @@ class OverlayService : Service() {
         const val ACTION_SET_PROJECTION = "set_projection"
         const val TARGET_WIDTH = 1300
         const val DOUBLE_TAP_MS = 250L
+        const val LINE_H = 64f
 
         const val TEST_JSON = """
         {"mode":"mark","blank_cells":["F2","G4","B10"],
@@ -189,22 +190,44 @@ class OverlayService : Service() {
             val cellLeft = col * cw
             val cellTop = row * ch
 
-            mainHandler.postDelayed({
-                when (a.type) {
-                    "text" -> {
-                        val needed = canvasView?.measureText(a.content) ?: 0f
-                        var x = cellLeft + cw * 0.08f
-                        if (x + needed > screenW - 16f) x = (screenW - 16f - needed).coerceAtLeast(8f)
-                        canvasView?.addText(a.content, x, cellTop + ch * 0.70f)
-                    }
-                    "tick"  -> canvasView?.addMark(OverlayCanvas.Type.TICK,
-                                    cellLeft + cw * 0.5f - 26f, cellTop + ch * 0.5f)
-                    "cross" -> canvasView?.addMark(OverlayCanvas.Type.CROSS,
-                                    cellLeft + cw * 0.5f - 23f, cellTop + ch * 0.5f)
+            if (a.type == "text") {
+                // Never start so far right that a sentence has nowhere to run.
+                val x = (cellLeft + cw * 0.08f).coerceAtMost(screenW * 0.5f)
+                val lines = wrapText(a.content, screenW - x - 20f)
+                // Reserve the rows this paragraph wraps into so nothing lands on it.
+                for (r in 1 until lines.size)
+                    used.add(Grid.label(col, (row + r).coerceAtMost(Grid.ROWS - 1)))
+                val baseY = cellTop + ch * 0.62f
+                for ((i, ln) in lines.withIndex()) {
+                    val yy = baseY + i * LINE_H
+                    mainHandler.postDelayed({ canvasView?.addText(ln, x, yy) }, delay + i * 260L)
                 }
-            }, delay)
-            delay += 500L
+                delay += 400L + lines.size * 260L
+            } else {
+                val mx = cellLeft + cw * 0.5f - (if (a.type == "tick") 26f else 23f)
+                val my = cellTop + ch * 0.5f
+                val t = if (a.type == "tick") OverlayCanvas.Type.TICK else OverlayCanvas.Type.CROSS
+                mainHandler.postDelayed({ canvasView?.addMark(t, mx, my) }, delay)
+                delay += 450L
+            }
         }
+    }
+
+    /** Greedy word wrap against the real paint metrics, max 4 lines. */
+    private fun wrapText(text: String, maxWidth: Float): List<String> {
+        val cv = canvasView ?: return listOf(text)
+        val out = ArrayList<String>()
+        for (para in text.split("\\n", "\n")) {
+            var line = ""
+            for (word in para.trim().split(Regex("\\s+"))) {
+                if (word.isEmpty()) continue
+                val cand = if (line.isEmpty()) word else "$line $word"
+                if (line.isEmpty() || cv.measureText(cand) <= maxWidth) line = cand
+                else { out.add(line); line = word }
+            }
+            if (line.isNotEmpty()) out.add(line)
+        }
+        return if (out.isEmpty()) listOf(text) else out.take(4)
     }
 
     private fun requestCapture() {
@@ -396,7 +419,7 @@ class OverlayCanvas(context: Context, typeface: Typeface) : View(context) {
     private val handler = Handler(Looper.getMainLooper())
     private var animating = false
     private val textPaint = Paint().apply {
-        isAntiAlias = true; color = Color.BLACK; textSize = 62f; this.typeface = typeface
+        isAntiAlias = true; color = Color.BLACK; textSize = 52f; this.typeface = typeface
         isFakeBoldText = true; style = Paint.Style.FILL_AND_STROKE; strokeWidth = 1.6f
     }
     private val markPaint = Paint().apply {
